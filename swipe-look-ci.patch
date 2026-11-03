@@ -1,0 +1,1145 @@
+--- a/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt
++++ b/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt
+@@ -43,6 +43,8 @@
+ import com.rfandango.haku_x.data.PlayerSlot
+ import com.rfandango.haku_x.data.RunSettings
+ import com.rfandango.haku_x.data.SaveStateStore
++import com.rfandango.haku_x.data.TouchLookConfig
++import com.rfandango.haku_x.data.TouchLookStore
+ import com.rfandango.haku_x.data.XboxDisc
+ import com.rfandango.haku_x.data.hdd.Dashboard
+ import com.rfandango.haku_x.input.PadRouter
+@@ -697,6 +699,7 @@
+     overlay.setControllerListener(OverlayBridge())
+     overlay.onMenuButtonTapped = { showMenu() }
+     overlay.drawGate = overlayPacer::mayDraw
++    overlay.touchLook = TouchLookStore.forGame(this, gameKey())
+     mLayout?.addView(overlay)
+     overlayPacer.attach(overlay)
+     onScreenController = overlay
+@@ -748,6 +751,7 @@
+         updateControllerVisibility()
+       },
+       getString(R.string.overlay_menu_controllers) to ::showPlayers,
++      getString(R.string.overlay_menu_look) to ::showTouchLook,
+     )
+     if (states) {
+       items += getString(R.string.overlay_menu_save_state) to { saveStates.showSlots(save = true) }
+@@ -835,6 +839,94 @@
+       .setNegativeButton(android.R.string.cancel, null))
+   }
+ 
++  /**
++   * The menu's Touch camera: swipe to look and how it feels, for this game,
++   * changed at once and kept. The game stays stopped while it is open, so a
++   * change is tried by resuming.
++   */
++  private fun showTouchLook() {
++    val key = gameKey()
++    val c = TouchLookStore.forGame(this, key)
++    fun percent(v: Int) = "$v%"
++    val items = mutableListOf<Pair<String, () -> Unit>>(
++      getString(R.string.settings_look_enable) + ": " +
++        getString(if (c.enabled) R.string.game_settings_on else R.string.game_settings_off) to {
++        setTouchLook(key, c.copy(enabled = !c.enabled))
++        showTouchLook()
++      },
++      getString(R.string.settings_look_sensitivity) + ": " + percent(c.sensitivity) to {
++        pickTouchLook(key, R.string.settings_look_sensitivity, TouchLookConfig.SENSITIVITIES, c.sensitivity, ::percent) {
++          c.copy(sensitivity = it)
++        }
++      },
++      getString(R.string.settings_look_vertical) + ": " + percent(c.vertical) to {
++        pickTouchLook(key, R.string.settings_look_vertical, TouchLookConfig.VERTICALS, c.vertical, ::percent) {
++          c.copy(vertical = it)
++        }
++      },
++      getString(R.string.settings_look_deadzone) + ": " + percent(c.deadZone) to {
++        pickTouchLook(key, R.string.settings_look_deadzone, TouchLookConfig.DEAD_ZONES, c.deadZone, ::percent) {
++          c.copy(deadZone = it)
++        }
++      },
++      getString(R.string.settings_look_smoothing) + ": " + getString(TouchLookConfig.smoothingLabel(c.smoothing)) to {
++        pickTouchLook(
++          key, R.string.settings_look_smoothing, TouchLookConfig.SMOOTHINGS, c.smoothing,
++          { getString(TouchLookConfig.smoothingLabel(it)) },
++        ) { c.copy(smoothing = it) }
++      },
++      getString(R.string.settings_look_area) + ": " + getString(TouchLookConfig.areaLabel(c.area)) to {
++        pickTouchLook(
++          key, R.string.settings_look_area, TouchLookConfig.AREAS, c.area,
++          { getString(TouchLookConfig.areaLabel(it)) },
++        ) { c.copy(area = it) }
++      },
++    )
++    if (TouchLookStore.hasOwn(this, key)) {
++      items += getString(R.string.look_menu_use_app) to {
++        setTouchLook(key, null)
++        showTouchLook()
++      }
++    }
++    showMenuDialog(
++      AlertDialog.Builder(this)
++        .setTitle(R.string.look_menu_title)
++        .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
++        .setPositiveButton(android.R.string.ok, null)
++    )
++  }
++
++  /**
++   * One Touch camera value chosen from a list: applied at once, then back to
++   * the Touch camera. The Touch camera opens before this closes, so the game
++   * stays stopped (a single-choice dialog stays open till it is dismissed).
++   */
++  private fun pickTouchLook(
++    key: String,
++    title: Int,
++    values: List<Int>,
++    current: Int,
++    label: (Int) -> String,
++    apply: (Int) -> TouchLookConfig,
++  ) {
++    showMenuDialog(
++      AlertDialog.Builder(this)
++        .setTitle(title)
++        .setSingleChoiceItems(values.map(label).toTypedArray(), values.indexOf(current)) { dialog, which ->
++          setTouchLook(key, apply(values[which]))
++          showTouchLook()
++          dialog.dismiss()
++        }
++        .setNegativeButton(android.R.string.cancel) { _, _ -> showTouchLook() }
++    )
++  }
++
++  /** This game's Touch camera settings, kept and in use at once; null: the app's again. */
++  private fun setTouchLook(key: String, config: TouchLookConfig?) {
++    TouchLookStore.setGame(this, key, config)
++    onScreenController?.touchLook = TouchLookStore.forGame(this, key)
++  }
++
+   /** The layout editor over the running game (input to the game pauses meanwhile). */
+   private fun editControls() {
+     val overlay = onScreenController ?: return
+--- a/android/app/src/main/java/com/rfandango/haku_x/OnScreenController.kt
++++ b/android/app/src/main/java/com/rfandango/haku_x/OnScreenController.kt
+@@ -9,12 +9,16 @@
+ import android.graphics.RectF
+ import android.graphics.RenderNode
+ import android.os.Build
++import android.os.Handler
++import android.os.Looper
+ import android.os.SystemClock
+ import android.util.AttributeSet
+ import android.view.MotionEvent
+ import android.view.View
+ import android.view.ViewConfiguration
+ import androidx.annotation.RequiresApi
++import com.rfandango.haku_x.data.TouchLookConfig
++import com.rfandango.haku_x.input.TouchLookEngine
+ import com.rfandango.haku_x.overlay.ControlId
+ import com.rfandango.haku_x.overlay.ControlKind
+ import com.rfandango.haku_x.overlay.ControlPainter
+@@ -108,14 +112,36 @@
+       }
+     }
+ 
++  /**
++   * Swipe to look (TouchLookEngine): a finger dragged over the screen, away from
++   * the controls, turns the camera as the right stick would. It takes the place
++   * of the on-screen right stick and, where it works, of the swipe up that opens
++   * the menu (the jewel and back still do). Playing only: not while the controls
++   * are hidden (a gamepad is attached) or edited.
++   */
++  var touchLook = TouchLookConfig()
++    set(value) {
++      if (field != value) {
++        field = value
++        resetAllInputs()
++      }
++    }
++
++  /** Swipe to look is in use now. */
++  private val lookOn get() = touchLook.enabled && !minimal && !editing
++
++  /** Whether a finger put down at x turns the camera. */
++  private fun inLookArea(x: Float) = touchLook.area == TouchLookConfig.AREA_ALL || x >= width / 2f
++
+   /** Not drawn and not touchable while playing. */
+-  private fun off(s: ControlSpec) = !s.visible || (minimal && (s.id != ControlId.MENU || jewelHidden))
++  private fun off(s: ControlSpec) = !s.visible || (minimal && (s.id != ControlId.MENU || jewelHidden)) ||
++    (lookOn && s.id == ControlId.RIGHT_STICK)
+ 
+   private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+   private val swipeUp = SwipeUpGestureRecognizer(
+     minDistancePx = { max(height * 0.14f, touchSlop * 8f) },
+     touchSlopPx = { touchSlop },
+-    canStartAt = { x, y -> y >= height * 0.35f && hit(x, y) == null },
++    canStartAt = { x, y -> y >= height * 0.35f && hit(x, y) == null && !(lookOn && inLookArea(x)) },
+     onTriggered = {
+       releaseAll()
+       onMenuButtonTapped?.invoke()
+@@ -398,14 +424,29 @@
+     val index = event.actionIndex
+     val pointer = event.getPointerId(index)
+     when (event.actionMasked) {
+-      MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> down(event.getX(index), event.getY(index), pointer)
+-      MotionEvent.ACTION_MOVE -> for (i in 0 until event.pointerCount) {
+-        move(event.getX(i), event.getY(i), event.getPointerId(i))
++      MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
++        val x = event.getX(index)
++        val y = event.getY(index)
++        // each move as the panel reports it, not batched to the display's frames: the look needs their times
++        if (lookOn) requestUnbufferedDispatch(event)
++        if (lookOn && lookPointer == -1 && inLookArea(x) && hit(x, y) == null) {
++          startLook(event, index, pointer)
++        } else {
++          down(x, y, pointer)
++        }
++      }
++      MotionEvent.ACTION_MOVE -> {
++        if (lookPointer != -1) requestUnbufferedDispatch(event)
++        for (i in 0 until event.pointerCount) {
++          val id = event.getPointerId(i)
++          if (id == lookPointer) lookMove(event, i) else move(event.getX(i), event.getY(i), id)
++        }
+       }
+       MotionEvent.ACTION_POINTER_UP -> up(pointer)
+       MotionEvent.ACTION_UP -> {
+         up(pointer)
+-        releaseAll() // the last finger: nothing can still be held
++        // the last finger: nothing can still be held, but the look's last moves are still to be sent
++        releaseAll(keepLook = true)
+       }
+       MotionEvent.ACTION_CANCEL -> releaseAll()
+     }
+@@ -483,6 +524,9 @@
+   }
+ 
+   private fun up(pointer: Int) {
++    if (pointer == lookPointer) {
++      lookPointer = -1 // its last moves still play out (lookStep)
++    }
+     if (pointer == menuPointer) {
+       if (menuPressed) {
+         onMenuButtonTapped?.invoke()
+@@ -502,8 +546,9 @@
+     held.entries.filter { it.value == pointer }.map { it.key }.forEach(::release)
+   }
+ 
+-  private fun releaseAll() {
++  private fun releaseAll(keepLook: Boolean = false) {
+     swipeUp.reset()
++    if (!keepLook) stopLook()
+     menuPressed = false
+     menuPointer = -1
+     for (i in 0..1) {
+@@ -572,6 +617,103 @@
+     listener?.onStickMoved(if (i == 0) Stick.LEFT else Stick.RIGHT, 0f, 0f)
+   }
+ 
++  // ------------------------------------------------------- swipe to look
++
++  /*
++   * The look finger's moves go to the engine as they arrive (each with its own
++   * time); a tick every few ms, while there is motion to play out, reads the
++   * stick from it and sends it. All on this (the UI) thread, which every other
++   * input reaches the listener on. Nothing is drawn: the finger leaves no mark,
++   * so a swipe costs the overlay no redraws.
++   *
++   * The output runs down by time, not by an event: a finger lifted, held still
++   * or cancelled lets it fall to zero within a few frames, so it cannot stay
++   * on.
++   */
++  private val lookEngine = TouchLookEngine()
++  private var lookPointer = -1
++  private var lookX = 0f
++  private var lookY = 0f
++  private var lookSentX = 0f
++  private var lookSentY = 0f
++  private var lookRunning = false
++  private val lookHandler = Handler(Looper.getMainLooper())
++  private val lookTick = Runnable { lookStep() }
++
++  private fun startLook(event: MotionEvent, index: Int, pointer: Int) {
++    lookPointer = pointer
++    lookX = event.getX(index)
++    lookY = event.getY(index)
++    lookEngine.beginStroke(event.eventTime.toDouble())
++  }
++
++  /** The look finger's moves in this event: the batched ones first, each at its own time, then the latest. */
++  private fun lookMove(event: MotionEvent, index: Int) {
++    val arrival = SystemClock.uptimeMillis().toDouble()
++    var x = lookX
++    var y = lookY
++    for (h in 0 until event.historySize) {
++      val hx = event.getHistoricalX(index, h)
++      val hy = event.getHistoricalY(index, h)
++      lookEngine.addMove(
++        event.getHistoricalEventTime(h).toDouble(), arrival,
++        ((hx - x) / density).toDouble(), ((hy - y) / density).toDouble(),
++      )
++      x = hx
++      y = hy
++    }
++    val nx = event.getX(index)
++    val ny = event.getY(index)
++    lookEngine.addMove(
++      event.eventTime.toDouble(), arrival,
++      ((nx - x) / density).toDouble(), ((ny - y) / density).toDouble(),
++    )
++    lookX = nx
++    lookY = ny
++    if (!lookRunning) {
++      lookRunning = true
++      lookHandler.post(lookTick)
++    }
++  }
++
++  private fun lookStep() {
++    if (!lookOn) {
++      stopLook()
++      return
++    }
++    val c = touchLook
++    val more = lookEngine.sample(
++      SystemClock.uptimeMillis().toDouble(),
++      c.smoothing.toDouble(),
++      c.sensitivity / 100.0,
++      c.vertical / 100.0,
++      c.deadZone / 100.0,
++    )
++    sendLook(lookEngine.outX, lookEngine.outY)
++    if (more) {
++      lookHandler.postDelayed(lookTick, LOOK_TICK_MS)
++    } else {
++      lookRunning = false
++    }
++  }
++
++  /** The look's stick to the listener when it changed (a swipe up is the stick up, as the on-screen stick's drag is). */
++  private fun sendLook(x: Float, y: Float) {
++    if (x == lookSentX && y == lookSentY) return
++    lookSentX = x
++    lookSentY = y
++    listener?.onStickMoved(Stick.RIGHT, x, y)
++  }
++
++  /** Ends the look at once: the finger forgotten, the stick centred. */
++  private fun stopLook() {
++    lookPointer = -1
++    lookEngine.clear()
++    lookHandler.removeCallbacks(lookTick)
++    lookRunning = false
++    sendLook(0f, 0f)
++  }
++
+   /* Eight ways: 45-degree sectors around the axes; the middle is neutral. */
+   private fun moveDpad(x: Float, y: Float) {
+     val s = layout?.get(ControlId.DPAD) ?: return
+@@ -816,6 +958,9 @@
+ 
+   private companion object {
+     const val STICK_DEAD_ZONE = 0.15f
++
++    /** How often the look's stick is read and sent while there is motion (ms): well over a game's frame rate. */
++    const val LOOK_TICK_MS = 4L
+     val ACCENT = 0xFF8BC34A.toInt()
+     val DPAD_BUTTONS = listOf(
+       ControlPainter.DPAD_UP to Button.DPAD_UP,
+--- a/android/app/src/main/java/com/rfandango/haku_x/data/TouchLook.kt
++++ b/android/app/src/main/java/com/rfandango/haku_x/data/TouchLook.kt
+@@ -0,0 +1,133 @@
++package com.rfandango.haku_x.data
++
++import android.content.Context
++import com.rfandango.haku_x.R
++import org.json.JSONObject
++import java.io.File
++
++/**
++ * Swipe to look: how a finger dragged over the screen turns the camera, in
++ * place of the on-screen right stick (see TouchLookEngine). Percentages are of
++ * the defaults; smoothing is the span of finger motion (ms) one stick value
++ * averages over: less answers sooner, more is steadier.
++ */
++data class TouchLookConfig(
++  val enabled: Boolean = false,
++  /** How far the camera turns for a swipe: 100 turns the stick fully at a fast 40 cm/s. */
++  val sensitivity: Int = 150,
++  /** Up and down as a share of left and right. */
++  val vertical: Int = 100,
++  /** The game's own dead zone to skip (share of the stick's range), so slow swipes still move the camera. */
++  val deadZone: Int = 20,
++  val smoothing: Int = 24,
++  /** Where a finger turns the camera: AREA_RIGHT or AREA_ALL. */
++  val area: Int = AREA_RIGHT,
++) {
++  fun toJson(): JSONObject = JSONObject()
++    .put("on", enabled)
++    .put("sens", sensitivity)
++    .put("vert", vertical)
++    .put("dz", deadZone)
++    .put("smooth", smoothing)
++    .put("area", area)
++
++  companion object {
++    /** The right half of the screen turns the camera (the left half is for the left stick). */
++    const val AREA_RIGHT = 0
++
++    /** Anywhere free of a control. */
++    const val AREA_ALL = 1
++
++    val SENSITIVITIES = listOf(50, 75, 100, 125, 150, 200, 250, 300, 400)
++    val VERTICALS = listOf(50, 75, 100, 125, 150)
++    val DEAD_ZONES = listOf(0, 10, 15, 20, 25, 30, 35)
++    val SMOOTHINGS = listOf(8, 16, 24, 40)
++    val AREAS = listOf(AREA_RIGHT, AREA_ALL)
++
++    /** The config a JSON object holds; what it lacks (or holds out of range) is base's. */
++    fun fromJson(o: JSONObject, base: TouchLookConfig = TouchLookConfig()) = TouchLookConfig(
++      enabled = o.optBoolean("on", base.enabled),
++      sensitivity = o.optInt("sens", base.sensitivity).coerceIn(10, 1000),
++      vertical = o.optInt("vert", base.vertical).coerceIn(10, 400),
++      deadZone = o.optInt("dz", base.deadZone).coerceIn(0, 60),
++      smoothing = o.optInt("smooth", base.smoothing).coerceIn(4, 100),
++      area = if (o.optInt("area", base.area) == AREA_ALL) AREA_ALL else AREA_RIGHT,
++    )
++
++    /** The string resource naming a smoothing value (the nearest preset's, for one set by hand). */
++    fun smoothingLabel(ms: Int): Int = when {
++      ms <= 8 -> R.string.look_smooth_minimal
++      ms <= 16 -> R.string.look_smooth_responsive
++      ms <= 24 -> R.string.look_smooth_balanced
++      else -> R.string.look_smooth_smooth
++    }
++
++    fun areaLabel(area: Int): Int = if (area == AREA_ALL) R.string.look_area_all else R.string.look_area_right
++  }
++}
++
++/**
++ * Swipe to look's settings as a file in the app's storage, read by the
++ * settings (main process) and the game (the core's process) alike and written
++ * by both: the settings change the default for every game, the game's menu
++ * the one game's. A file, as the on-screen layout and the mods' choices are,
++ * because each process keeps its own copy of the shared preferences, and the
++ * one written second would write the other's changes away.
++ *
++ * {"global": {...}, "games": {"<game key>": {...}}}: a game's entry is the
++ * whole config it was set to, kept apart from the default after that.
++ */
++object TouchLookStore {
++  private const val FILE = "touch_look.json"
++  private val LOCK = Any()
++
++  /** The default for every game that has none of its own. */
++  fun global(context: Context): TouchLookConfig = synchronized(LOCK) {
++    TouchLookConfig.fromJson(read(context).optJSONObject("global") ?: JSONObject())
++  }
++
++  fun setGlobal(context: Context, config: TouchLookConfig) {
++    synchronized(LOCK) {
++      write(context, read(context).put("global", config.toJson()))
++    }
++  }
++
++  /** What a game runs with: its own config if it has one, else the default. */
++  fun forGame(context: Context, game: String): TouchLookConfig = synchronized(LOCK) {
++    val root = read(context)
++    val base = TouchLookConfig.fromJson(root.optJSONObject("global") ?: JSONObject())
++    val own = root.optJSONObject("games")?.optJSONObject(game)
++    if (own == null) base else TouchLookConfig.fromJson(own, base)
++  }
++
++  fun hasOwn(context: Context, game: String): Boolean = synchronized(LOCK) {
++    read(context).optJSONObject("games")?.has(game) == true
++  }
++
++  /** A game's own config; null takes it back to the default. */
++  fun setGame(context: Context, game: String, config: TouchLookConfig?) {
++    synchronized(LOCK) {
++      val root = read(context)
++      val games = root.optJSONObject("games") ?: JSONObject().also { root.put("games", it) }
++      if (config == null) games.remove(game) else games.put(game, config.toJson())
++      write(context, root)
++    }
++  }
++
++  private fun read(context: Context): JSONObject {
++    val file = File(context.filesDir, FILE)
++    if (!file.isFile) return JSONObject()
++    return try {
++      JSONObject(file.readText())
++    } catch (_: Exception) {
++      JSONObject()
++    }
++  }
++
++  private fun write(context: Context, root: JSONObject) {
++    val file = File(context.filesDir, FILE)
++    val tmp = File(context.filesDir, "$FILE.${android.os.Process.myPid()}.tmp")
++    tmp.writeText(root.toString())
++    tmp.renameTo(file)
++  }
++}
+--- a/android/app/src/main/java/com/rfandango/haku_x/input/TouchLookEngine.kt
++++ b/android/app/src/main/java/com/rfandango/haku_x/input/TouchLookEngine.kt
+@@ -0,0 +1,267 @@
++package com.rfandango.haku_x.input
++
++import kotlin.math.hypot
++import kotlin.math.max
++import kotlin.math.min
++
++/**
++ * Swipe to look: a finger's motion as the right stick's deflection.
++ *
++ * A stick is a velocity command (the game turns the camera at a rate the
++ * deflection sets), a finger on a screen is a position. To make the camera
++ * follow the finger and stop with it, the stick is held at the finger's
++ * velocity: the game integrates that into the finger's own displacement.
++ *
++ * The finger arrives as timestamped moves. The engine keeps its cumulative
++ * position as a piecewise-linear function of event time and answers with
++ *
++ *     velocity(now) = (position(q) - position(q - window)) / window,  q = now - delay
++ *
++ * a difference of positions, so what the camera is given adds up to exactly
++ * the finger's displacement however the touch events were batched or timed.
++ * The delay adapts to how stale the newest touch sample can be (how late the
++ * system delivered it, and how far apart the panel's samples are): shorter
++ * than that, the newest edge of the window would have to be guessed, which
++ * biases the output low. While it changes, the output is scaled by the rate
++ * q runs at, which keeps the sum exact.
++ *
++ * The velocity goes through a radial curve: it skips the game's own dead zone
++ * (an Xbox title ignores the stick up to about a quarter of its range), so
++ * slow motion still turns the camera, and the direction of the swipe is kept.
++ *
++ * Plain Kotlin, no Android types: the controller feeds it from the UI thread
++ * and reads it there, so it takes no locks.
++ */
++class TouchLookEngine {
++  private val time = DoubleArray(CAP)
++  private val px = DoubleArray(CAP)
++  private val py = DoubleArray(CAP)
++  private var head = 0
++  private var size = 0
++
++  /** Where the finger would be if every move so far added up (dp). */
++  private var sumX = 0.0
++  private var sumY = 0.0
++
++  /** The last RING samples' delivery lateness and spacing (ms). */
++  private val late = DoubleArray(RING)
++  private val gap = DoubleArray(RING)
++  private var ring = 0
++  private var lastEvent = -1.0
++
++  /** The delay q lags now by (ms), and when it was last adapted. */
++  private var delay = DELAY_START
++  private var lastNow = -1.0
++
++  /** The last sample()'s answer: the stick's deflection, x right and y down, each within -1..1. */
++  var outX = 0f
++    private set
++  var outY = 0f
++    private set
++
++  /** position() writes its answer here. */
++  private var atX = 0.0
++  private var atY = 0.0
++
++  /** Forgets everything (a new game, or the feature turned off). */
++  fun clear() {
++    head = 0
++    size = 0
++    sumX = 0.0
++    sumY = 0.0
++    late.fill(0.0)
++    gap.fill(0.0)
++    ring = 0
++    lastEvent = -1.0
++    delay = DELAY_START
++    lastNow = -1.0
++    outX = 0f
++    outY = 0f
++  }
++
++  /**
++   * A finger came down at eventMs (the event's time): the position stays
++   * where the last one left it, so a finger landing elsewhere is not a jump.
++   */
++  fun beginStroke(eventMs: Double) {
++    push(eventMs, sumX, sumY)
++    lastEvent = -1.0 // the next spacing is not measured across strokes
++  }
++
++  /**
++   * The finger moved by (dx, dy) dp at eventMs (the sample's time); arrivalMs
++   * is when the system delivered it.
++   */
++  fun addMove(eventMs: Double, arrivalMs: Double, dx: Double, dy: Double) {
++    sumX += dx
++    sumY += dy
++    val t = push(eventMs, sumX, sumY)
++    val i = ring % RING
++    ring++
++    late[i] = max(0.0, arrivalMs - t)
++    val g = if (lastEvent >= 0.0) t - lastEvent else 0.0
++    gap[i] = if (g > 0.0 && g <= GAP_MAX) g else 0.0
++    lastEvent = t
++  }
++
++  /** Appends a point (time never goes back); returns the time it was kept at. */
++  private fun push(eventMs: Double, x: Double, y: Double): Double {
++    var t = eventMs
++    if (size > 0) {
++      val newest = time[at(size - 1)]
++      if (t < newest) t = newest
++    }
++    if (size == CAP) {
++      head = (head + 1) % CAP
++      size--
++    }
++    val i = at(size)
++    time[i] = t
++    px[i] = x
++    py[i] = y
++    size++
++    return t
++  }
++
++  private fun at(k: Int) = (head + k) % CAP
++
++  /** The finger's position at time tau (linear between samples, held before the first and after the last). */
++  private fun position(tau: Double) {
++    val first = at(0)
++    val last = at(size - 1)
++    if (tau <= time[first]) {
++      atX = px[first]
++      atY = py[first]
++      return
++    }
++    if (tau >= time[last]) {
++      atX = px[last]
++      atY = py[last]
++      return
++    }
++    var lo = 0
++    var hi = size - 1 // time[lo] <= tau < time[hi]
++    while (hi - lo > 1) {
++      val mid = (lo + hi) ushr 1
++      if (time[at(mid)] <= tau) lo = mid else hi = mid
++    }
++    val a = at(lo)
++    val b = at(hi)
++    val span = time[b] - time[a]
++    if (span <= 0.0) {
++      atX = px[b]
++      atY = py[b]
++      return
++    }
++    val f = (tau - time[a]) / span
++    atX = px[a] + (px[b] - px[a]) * f
++    atY = py[a] + (py[b] - py[a]) * f
++  }
++
++  /** Moves the delay toward what the samples need; returns the rate q runs at (1 - d delay / d now). */
++  private fun adapt(now: Double): Double {
++    var worstLate = 0.0
++    var worstGap = 0.0
++    for (i in 0 until RING) {
++      worstLate = max(worstLate, late[i])
++      worstGap = max(worstGap, gap[i])
++    }
++    val target = min(max(worstLate + worstGap + 1.0, DELAY_MIN), DELAY_MAX)
++    val dt = if (lastNow < 0.0) 0.0 else max(0.0, now - lastNow)
++    lastNow = now
++    val before = delay
++    delay = if (target > delay) min(target, delay + DELAY_RISE * dt) else max(target, delay - DELAY_FALL * dt)
++    return if (dt > 0.0) 1.0 - (delay - before) / dt else 1.0
++  }
++
++  /**
++   * The stick's deflection for time nowMs (uptime ms, the events' clock), into
++   * outX and outY. windowMs is the smoothing; sensitivity and vertical scale
++   * the finger's speed (1.0 is the default feel, vertical a share of it);
++   * deadZone is the game's own dead zone to skip, 0..1.
++   *
++   * Returns whether more is to follow (call again soon): false once the
++   * finger has been still for the whole window, the output zero.
++   */
++  fun sample(nowMs: Double, windowMs: Double, sensitivity: Double, vertical: Double, deadZone: Double): Boolean {
++    if (size == 0) {
++      outX = 0f
++      outY = 0f
++      return false
++    }
++    val rate = adapt(nowMs)
++    val q = nowMs - delay
++    // Nothing before q - window is looked at again: drop all but the point that brackets it.
++    val from = q - windowMs
++    while (size >= 2 && time[at(1)] <= from) {
++      head = (head + 1) % CAP
++      size--
++    }
++    if (from >= time[at(size - 1)]) {
++      outX = 0f
++      outY = 0f
++      return false
++    }
++    position(q)
++    val x1 = atX
++    val y1 = atY
++    position(from)
++    // q runs at `rate` times real time while the delay moves: scaling by it keeps the sum exact.
++    val scale = 1000.0 / windowMs * rate
++    val vx = (x1 - atX) * scale
++    val vy = (y1 - atY) * scale
++    stick(vx, vy, sensitivity, vertical, deadZone)
++    return true
++  }
++
++  /** The curve, into outX and outY (dp/s of finger speed in). */
++  private fun stick(vx: Double, vy: Double, sensitivity: Double, vertical: Double, deadZone: Double) {
++    val ex = vx * sensitivity
++    val ey = vy * sensitivity * vertical
++    val m = hypot(ex, ey) / V_FULL
++    if (m <= 0.0) {
++      outX = 0f
++      outY = 0f
++      return
++    }
++    val k = shape(m, deadZone) / m
++    outX = (ex / V_FULL * k).toFloat()
++    outY = (ey / V_FULL * k).toFloat()
++  }
++
++  companion object {
++    private const val CAP = 256
++
++    /** Finger speed (dp/s, after sensitivity) that is the stick's full deflection. */
++    const val V_FULL = 2500.0
++
++    /**
++     * Where the dead-zone skip ends: speeds up to this share of V_FULL span
++     * 0..deadZone, so the camera starts to move the moment the finger does.
++     */
++    private const val M0 = 0.015
++
++    private const val DELAY_MIN = 4.0
++    private const val DELAY_MAX = 30.0
++    private const val DELAY_START = 8.0
++    private const val DELAY_RISE = 0.25
++    private const val DELAY_FALL = 0.02
++    private const val RING = 8
++    private const val GAP_MAX = 50.0
++
++    /**
++     * The deflection (0..1) for a speed (m, 1 is V_FULL): the dead zone's
++     * range first, then linear to full. A dead zone below M0 is no skip at
++     * all (the curve is the identity).
++     */
++    fun shape(m: Double, deadZone: Double): Double {
++      val m0 = min(M0, deadZone)
++      return when {
++        m <= 0.0 -> 0.0
++        m0 > 0.0 && m <= m0 -> m * deadZone / m0
++        m < 1.0 -> deadZone + (1.0 - deadZone) * (m - m0) / (1.0 - m0)
++        else -> 1.0
++      }
++    }
++  }
++}
+--- a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt
+@@ -177,6 +177,7 @@
+         supportingContent = { Text(stringResource(R.string.controllers_settings_desc)) },
+         modifier = Modifier.clickable(onClick = onControllers),
+       )
++      TouchLookSettings()
+ 
+       Section(stringResource(R.string.settings_section_display))
+       ListItem(
+--- a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/TouchLookSettings.kt
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/TouchLookSettings.kt
+@@ -0,0 +1,133 @@
++package com.rfandango.haku_x.ui.settings
++
++import androidx.compose.foundation.clickable
++import androidx.compose.material3.ListItem
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
++import com.rfandango.haku_x.R
++import com.rfandango.haku_x.data.TouchLookConfig
++import com.rfandango.haku_x.data.TouchLookStore
++import com.rfandango.haku_x.ui.common.ChoiceDialog
++import com.rfandango.haku_x.ui.common.Hint
++import com.rfandango.haku_x.ui.common.Section
++import com.rfandango.haku_x.ui.common.SwitchItem
++
++private enum class LookDialog { SENSITIVITY, VERTICAL, DEAD_ZONE, SMOOTHING, AREA }
++
++/**
++ * Swipe to look (TouchLookEngine): a finger dragged over the screen turns the camera, in place of
++ * the on-screen right stick. These are the defaults for every game; the game's own menu (Touch
++ * camera) sets them for one game. Each change is kept at once (TouchLookStore) and read at the
++ * next game start.
++ */
++@Composable
++fun TouchLookSettings() {
++  val context = LocalContext.current
++  var config by remember { mutableStateOf(TouchLookStore.global(context)) }
++  var dialog by remember { mutableStateOf<LookDialog?>(null) }
++  fun change(next: TouchLookConfig) {
++    config = next
++    TouchLookStore.setGlobal(context, next)
++  }
++
++  Section(stringResource(R.string.settings_section_look))
++  Hint(stringResource(R.string.settings_look_desc))
++  SwitchItem(
++    title = stringResource(R.string.settings_look_enable),
++    summary = stringResource(R.string.settings_look_enable_desc) + " " +
++      stringResource(R.string.settings_applies_next_start),
++    checked = config.enabled,
++    onChange = { change(config.copy(enabled = it)) },
++  )
++  ListItem(
++    headlineContent = { Text(stringResource(R.string.settings_look_sensitivity)) },
++    supportingContent = { Text("${config.sensitivity}%. " + stringResource(R.string.settings_look_sensitivity_desc)) },
++    modifier = Modifier.clickable { dialog = LookDialog.SENSITIVITY },
++  )
++  ListItem(
++    headlineContent = { Text(stringResource(R.string.settings_look_vertical)) },
++    supportingContent = { Text("${config.vertical}%. " + stringResource(R.string.settings_look_vertical_desc)) },
++    modifier = Modifier.clickable { dialog = LookDialog.VERTICAL },
++  )
++  ListItem(
++    headlineContent = { Text(stringResource(R.string.settings_look_deadzone)) },
++    supportingContent = { Text("${config.deadZone}%. " + stringResource(R.string.settings_look_deadzone_desc)) },
++    modifier = Modifier.clickable { dialog = LookDialog.DEAD_ZONE },
++  )
++  ListItem(
++    headlineContent = { Text(stringResource(R.string.settings_look_smoothing)) },
++    supportingContent = {
++      Text(
++        stringResource(TouchLookConfig.smoothingLabel(config.smoothing)) + ". " +
++          stringResource(R.string.settings_look_smoothing_desc),
++      )
++    },
++    modifier = Modifier.clickable { dialog = LookDialog.SMOOTHING },
++  )
++  ListItem(
++    headlineContent = { Text(stringResource(R.string.settings_look_area)) },
++    supportingContent = { Text(stringResource(TouchLookConfig.areaLabel(config.area))) },
++    modifier = Modifier.clickable { dialog = LookDialog.AREA },
++  )
++
++  when (dialog) {
++    LookDialog.SENSITIVITY -> ChoiceDialog(
++      title = stringResource(R.string.settings_look_sensitivity),
++      options = TouchLookConfig.SENSITIVITIES.map { it to "$it%" },
++      current = config.sensitivity,
++      onPick = {
++        change(config.copy(sensitivity = it))
++        dialog = null
++      },
++      onDismiss = { dialog = null },
++    )
++    LookDialog.VERTICAL -> ChoiceDialog(
++      title = stringResource(R.string.settings_look_vertical),
++      options = TouchLookConfig.VERTICALS.map { it to "$it%" },
++      current = config.vertical,
++      onPick = {
++        change(config.copy(vertical = it))
++        dialog = null
++      },
++      onDismiss = { dialog = null },
++    )
++    LookDialog.DEAD_ZONE -> ChoiceDialog(
++      title = stringResource(R.string.settings_look_deadzone),
++      options = TouchLookConfig.DEAD_ZONES.map { it to "$it%" },
++      current = config.deadZone,
++      onPick = {
++        change(config.copy(deadZone = it))
++        dialog = null
++      },
++      onDismiss = { dialog = null },
++    )
++    LookDialog.SMOOTHING -> ChoiceDialog(
++      title = stringResource(R.string.settings_look_smoothing),
++      options = TouchLookConfig.SMOOTHINGS.map { it to stringResource(TouchLookConfig.smoothingLabel(it)) },
++      current = config.smoothing,
++      onPick = {
++        change(config.copy(smoothing = it))
++        dialog = null
++      },
++      onDismiss = { dialog = null },
++    )
++    LookDialog.AREA -> ChoiceDialog(
++      title = stringResource(R.string.settings_look_area),
++      options = TouchLookConfig.AREAS.map { it to stringResource(TouchLookConfig.areaLabel(it)) },
++      current = config.area,
++      onPick = {
++        change(config.copy(area = it))
++        dialog = null
++      },
++      onDismiss = { dialog = null },
++    )
++    null -> {}
++  }
++}
+--- a/android/app/src/main/res/values/strings.xml
++++ b/android/app/src/main/res/values/strings.xml
+@@ -294,6 +294,28 @@
+   <string name="settings_section_controls">Controls</string>
+   <string name="settings_overlay">On-screen controls</string>
+   <string name="settings_overlay_desc">Move and resize each control of the on-screen controller.</string>
++  <string name="settings_section_look">Swipe to look</string>
++  <string name="settings_look_desc">Drag a finger over the screen, away from the controls, to turn the camera as in Android shooters: the view follows the finger and stops when it does. It replaces the on-screen right stick and, where it turns the camera, the swipe up that opens the menu (the jewel and back still open it). These are the defaults for every game; the game\'s menu has Touch camera for a single game.</string>
++  <string name="settings_look_enable">Swipe to look</string>
++  <string name="settings_look_enable_desc">Turn the camera by dragging a finger over the screen.</string>
++  <string name="settings_look_sensitivity">Sensitivity</string>
++  <string name="settings_look_sensitivity_desc">How far the camera turns for a swipe. The fastest a game turns is its own limit.</string>
++  <string name="settings_look_vertical">Vertical sensitivity</string>
++  <string name="settings_look_vertical_desc">Looking up and down, as a share of looking left and right.</string>
++  <string name="settings_look_deadzone">Dead zone compensation</string>
++  <string name="settings_look_deadzone_desc">Skips the game\'s own dead zone, so a slow swipe still turns the camera. Raise it if slow swipes do nothing; lower it if the camera creeps while your finger is still.</string>
++  <string name="settings_look_smoothing">Smoothing</string>
++  <string name="settings_look_smoothing_desc">Less answers sooner; more is steadier at the game\'s frame rate.</string>
++  <string name="settings_look_area">Touch area</string>
++  <string name="look_smooth_minimal">Minimal</string>
++  <string name="look_smooth_responsive">Responsive</string>
++  <string name="look_smooth_balanced">Balanced</string>
++  <string name="look_smooth_smooth">Smooth</string>
++  <string name="look_area_right">Right half of the screen</string>
++  <string name="look_area_all">Whole screen</string>
++  <string name="overlay_menu_look">Touch camera</string>
++  <string name="look_menu_title">Touch camera (this game)</string>
++  <string name="look_menu_use_app">Use the app settings</string>
+   <string name="overlay_menu_controllers">Controllers</string>
+   <string name="overlay_menu_save_state">Save state</string>
+   <string name="overlay_menu_load_state">Load state</string>
+--- a/android/app/src/test/java/com/rfandango/haku_x/input/TouchLookEngineTest.kt
++++ b/android/app/src/test/java/com/rfandango/haku_x/input/TouchLookEngineTest.kt
+@@ -0,0 +1,210 @@
++package com.rfandango.haku_x.input
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import kotlin.math.atan2
++import kotlin.math.hypot
++import kotlin.math.max
++import kotlin.math.min
++import kotlin.math.round
++
++class TouchLookEngineTest {
++  private class Stroke(val startMs: Double, val durationMs: Double, val totalX: Double, val totalY: Double)
++
++  private class Event(val arrival: Double, val time: Double, val dx: Double, val dy: Double, val down: Boolean)
++
++  private class Outcome(
++    /** What a game turning at the stick's rate would have turned the camera by (dp of finger travel). */
++    val movedX: Double,
++    val peak: Double,
++    val lastNonZeroMs: Double,
++    val moreAtEnd: Boolean,
++    val minDegrees: Double,
++    val maxDegrees: Double,
++  )
++
++  /** A minimum-jerk reach, the shape of a real finger's flick: 0 at start, total at start + duration. */
++  private fun reach(total: Double, start: Double, duration: Double, t: Double): Double {
++    val s = min(max((t - start) / duration, 0.0), 1.0)
++    return total * (10 * s * s * s - 15 * s * s * s * s + 6 * s * s * s * s * s)
++  }
++
++  /**
++   * Strokes followed by a panel reporting at hz (each report delivered lateMs after it happened),
++   * the stick read every 4 ms until 400 ms after the last finger stopped.
++   */
++  private fun drive(
++    engine: TouchLookEngine,
++    strokes: List<Stroke>,
++    hz: Double = 120.0,
++    window: Double = 24.0,
++    sensitivity: Double = 1.0,
++    deadZone: Double = 0.015,
++    lateMs: Double = 0.5,
++  ): Outcome {
++    val events = ArrayList<Event>()
++    var end = 0.0
++    for (s in strokes) {
++      events += Event(s.startMs + lateMs, s.startMs, 0.0, 0.0, true)
++      var x = 0.0
++      var y = 0.0
++      var k = 1
++      while (true) {
++        val t = s.startMs + k * 1000.0 / hz
++        if (t > s.startMs + s.durationMs) break
++        val nx = reach(s.totalX, s.startMs, s.durationMs, t)
++        val ny = reach(s.totalY, s.startMs, s.durationMs, t)
++        val time = round(t)
++        events += Event(time + lateMs, time, nx - x, ny - y, false)
++        x = nx
++        y = ny
++        k++
++      }
++      end = max(end, s.startMs + s.durationMs)
++    }
++    events.sortBy { it.arrival }
++    var i = 0
++    var moved = 0.0
++    var peak = 0.0
++    var lastNonZero = 0.0
++    var more = false
++    var minDeg = Double.MAX_VALUE
++    var maxDeg = -Double.MAX_VALUE
++    var now = 0.0
++    while (now <= end + 400.0) {
++      while (i < events.size && events[i].arrival <= now) {
++        val e = events[i++]
++        if (e.down) engine.beginStroke(e.time) else engine.addMove(e.time, e.arrival, e.dx, e.dy)
++      }
++      more = engine.sample(now, window, sensitivity, 1.0, deadZone)
++      moved += engine.outX * TouchLookEngine.V_FULL / sensitivity * 0.004
++      val mag = hypot(engine.outX.toDouble(), engine.outY.toDouble())
++      peak = max(peak, mag)
++      if (mag > 0.1) {
++        val deg = Math.toDegrees(atan2(engine.outY.toDouble(), engine.outX.toDouble()))
++        minDeg = min(minDeg, deg)
++        maxDeg = max(maxDeg, deg)
++      }
++      if (mag > 0.0) lastNonZero = now
++      now += 4.0
++    }
++    return Outcome(moved, peak, lastNonZero, more, minDeg, maxDeg)
++  }
++
++  @Test
++  fun anEngineThatSawNothingIsStill() {
++    val e = TouchLookEngine()
++    assertFalse(e.sample(1000.0, 24.0, 1.0, 1.0, 0.2))
++    assertEquals(0f, e.outX, 0f)
++    assertEquals(0f, e.outY, 0f)
++  }
++
++  @Test
++  fun aSteadySwipeReadsAsItsSpeed() {
++    // 600 dp/s: 4.8 dp every 8 ms
++    val e = TouchLookEngine()
++    e.beginStroke(0.0)
++    for (t in 8..1000 step 8) e.addMove(t.toDouble(), t + 0.5, 4.8, 0.0)
++    assertTrue(e.sample(1000.5, 24.0, 1.0, 1.0, 0.015))
++    assertEquals(600.0 / TouchLookEngine.V_FULL, e.outX.toDouble(), 0.002)
++    assertEquals(0.0, e.outY.toDouble(), 1e-6)
++  }
++
++  @Test
++  fun theCameraLandsWhereTheFingerDid() {
++    // a 300 dp flick in 160 ms (sensitivity halved so it doesn't reach full deflection)
++    val r = drive(TouchLookEngine(), listOf(Stroke(100.0, 160.0, 300.0, 0.0)), sensitivity = 0.5)
++    assertEquals(300.0, r.movedX, 3.0)
++    assertTrue(r.peak < 1.0)
++  }
++
++  @Test
++  fun thatHoldsForEveryPanelRateAndSmoothing() {
++    for (hz in listOf(60.0, 120.0, 240.0, 480.0)) {
++      for (w in listOf(8.0, 16.0, 24.0, 40.0)) {
++        val r = drive(TouchLookEngine(), listOf(Stroke(100.0, 200.0, 120.0, 0.0)), hz = hz, window = w)
++        assertEquals("$hz Hz, window $w ms", 120.0, r.movedX, 120.0 * 0.03)
++      }
++    }
++  }
++
++  @Test
++  fun theCameraStopsWithTheFinger() {
++    val r = drive(TouchLookEngine(), listOf(Stroke(100.0, 160.0, 300.0, 0.0)), sensitivity = 0.5)
++    // the finger stops at 260 ms: the stick is zero again within the window and the delay
++    assertTrue("still moving at ${r.lastNonZeroMs} ms", r.lastNonZeroMs - 260.0 < 70.0)
++    assertFalse(r.moreAtEnd)
++  }
++
++  @Test
++  fun aFingerLandingElsewhereIsNoJump() {
++    // the second finger comes down 10 ms after the first lifted (the engine keeps only moves, not places)
++    val one = drive(TouchLookEngine(), listOf(Stroke(100.0, 200.0, 100.0, 0.0)))
++    val two = drive(
++      TouchLookEngine(),
++      listOf(Stroke(100.0, 200.0, 100.0, 0.0), Stroke(310.0, 200.0, 100.0, 0.0)),
++    )
++    assertEquals(200.0, two.movedX, 2.0)
++    assertTrue(two.peak <= one.peak * 1.05)
++  }
++
++  @Test
++  fun aDiagonalSwipeKeepsItsDirection() {
++    val a = Math.toRadians(30.0)
++    val r = drive(
++      TouchLookEngine(),
++      listOf(Stroke(100.0, 300.0, 300.0 * Math.cos(a), 300.0 * Math.sin(a))),
++      deadZone = 0.25,
++    )
++    assertEquals(30.0, r.minDegrees, 0.5)
++    assertEquals(30.0, r.maxDegrees, 0.5)
++  }
++
++  @Test
++  fun sensitivityAndVerticalScaleTheDeflection() {
++    fun steadyY(sensitivity: Double, vertical: Double): Float {
++      val e = TouchLookEngine()
++      e.beginStroke(0.0)
++      for (t in 8..1000 step 8) e.addMove(t.toDouble(), t + 0.5, 0.0, 4.8)
++      e.sample(1000.5, 24.0, sensitivity, vertical, 0.015)
++      return e.outY
++    }
++    assertEquals(0.24f, steadyY(1.0, 1.0), 0.002f)
++    assertEquals(0.12f, steadyY(1.0, 0.5), 0.002f)
++    assertEquals(0.48f, steadyY(2.0, 1.0), 0.002f)
++    assertEquals(1f, steadyY(8.0, 1.0), 1e-6f) // never past the stick's range
++  }
++
++  @Test
++  fun clearForgetsTheFinger() {
++    val e = TouchLookEngine()
++    e.beginStroke(0.0)
++    e.addMove(8.0, 8.5, 4.8, 0.0)
++    e.clear()
++    assertFalse(e.sample(20.0, 24.0, 1.0, 1.0, 0.2))
++    assertEquals(0f, e.outX, 0f)
++  }
++
++  @Test
++  fun theCurveSkipsTheGamesDeadZone() {
++    fun shape(m: Double, deadZone: Double) = TouchLookEngine.shape(m, deadZone)
++    assertEquals(0.0, shape(0.0, 0.2), 0.0)
++    // the slowest motion that counts lands at the dead zone's edge: the game just starts to turn
++    assertEquals(0.2, shape(0.015, 0.2), 1e-12)
++    assertEquals(1.0, shape(1.0, 0.2), 1e-12)
++    assertEquals(1.0, shape(3.0, 0.2), 0.0)
++    // a dead zone as small as the ramp is no skip at all
++    assertEquals(0.4, shape(0.4, 0.0), 1e-12)
++    assertEquals(0.4, shape(0.4, 0.015), 1e-12)
++    var last = 0.0
++    var m = 0.0
++    while (m <= 1.3) {
++      val v = shape(m, 0.25)
++      assertTrue("not rising at $m", v >= last)
++      last = v
++      m += 0.0005
++    }
++  }
++}
