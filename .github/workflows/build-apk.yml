@@ -30,6 +30,7 @@ jobs:
           java-version: "21"
 
 
+
       - name: Apply swipe to look and widescreen mods
         run: |
           set -euo pipefail
@@ -42,23 +43,21 @@ jobs:
           for patch_file in "${patch_files[@]}"; do
             if [ ! -f "$patch_file" ]; then
               echo "ERROR: Missing patch file: $patch_file"
-              echo "Upload both patch files to the repository's top folder."
               exit 1
             fi
 
             echo "Checking $patch_file"
 
-            if ! patch -p1 -F0 --dry-run < "$patch_file"; then
-              echo "ERROR: Patch cannot be applied: $patch_file"
-              exit 1
-            fi
+            patch --no-backup -p1 -F0 --dry-run < "$patch_file"
 
             echo "Applying $patch_file"
-            patch -p1 -F0 < "$patch_file"
+            patch --no-backup -p1 -F0 < "$patch_file"
           done
 
-          echo "Both patches applied successfully!"
+          # Remove any backup files left by previous patch operations
+          find android -type f \( -name "*.orig" -o -name "*.rej" \) -delete
 
+          echo "Both patches applied successfully!"
 
       - name: Take the native libraries from the release APK
         env:
