@@ -1,0 +1,554 @@
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt b/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt	2026-11-06 12:06:49.398136059 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt	2026-11-06 12:06:49.450061169 +0000
+@@ -612,7 +612,7 @@
+     if (discUri == null) return null
+     val key = gameKey()
+     if (!ModCatalog.has(this, key)) return null
+-    return runCatching { ModRun.write(this, key) }
++    return runCatching { ModRun.write(this, key, discUri) }
+       .onFailure { Log.e(TAG, "mods: ${it.message}") }
+       .getOrNull()
+       ?.let { (file, cheats) ->
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/data/Mods.kt b/android/app/src/main/java/com/rfandango/haku_x/data/Mods.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/data/Mods.kt	2026-11-06 12:06:49.398672988 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/data/Mods.kt	2026-11-06 12:06:49.455487342 +0000
+@@ -2,6 +2,7 @@
+ 
+ import android.content.Context
+ import android.content.res.AssetManager
++import android.net.Uri
+ import android.util.Log
+ import org.json.JSONObject
+ import java.io.File
+@@ -18,6 +19,8 @@
+   val author: String,
+   val patches: List<Pair<String, String>>,
+   val refresh: Int = 0,
++  /** Added by the user in the app (filesDir/user_mods), not packed in the APK. */
++  val user: Boolean = false,
+ )
+ 
+ /** A cheat (mods/README.md): its name, note, once, and its code lines as written. */
+@@ -47,19 +50,64 @@
+ 
+   private fun folder(context: Context, gameKey: String) = folders(context)[gameKey.uppercase(Locale.ROOT)]
+ 
+-  /** Whether the disc with this game key has mods or cheats. */
+-  fun has(context: Context, gameKey: String) = folder(context, gameKey) != null
++  /** The user's own mods and cheats for a game: filesDir/user_mods/<GAME KEY>/<mod>/mod.txt, cheats.txt. */
++  private fun userDir(context: Context, gameKey: String) =
++    File(context.filesDir, "user_mods/${gameKey.uppercase(Locale.ROOT)}")
++
++  /** Whether the disc with this game key has mods or cheats (packed, or the user's). */
++  fun has(context: Context, gameKey: String) =
++    folder(context, gameKey) != null || userDir(context, gameKey).list().orEmpty().isNotEmpty()
+ 
+-  /** The disc's mods (by folder name) and cheats (in file order). */
++  /** The disc's mods (the packed ones by folder name, then the user's) and cheats (in file order). */
+   fun load(context: Context, gameKey: String): GameMods {
+-    val dir = folder(context, gameKey) ?: return GameMods(emptyList(), emptyList())
+     val am = context.assets
++    val dir = folder(context, gameKey)
+     val base = "$ROOT/$dir"
+-    val mods = am.list(base).orEmpty().sorted().mapNotNull { id ->
++    val packed = if (dir == null) emptyList<ModInfo>() else am.list(base).orEmpty().sorted().mapNotNull { id ->
+       text(am, "$base/$id/mod.txt")?.let { parseMod(id, it) }
+     }
+-    val cheats = text(am, "$base/cheats.txt")?.let { parseCheats(it) }.orEmpty()
+-    return GameMods(mods, cheats)
++    val packedCheats = dir?.let { text(am, "$base/cheats.txt") }?.let { parseCheats(it) }.orEmpty()
++    val user = userDir(context, gameKey)
++    val userMods = user.listFiles().orEmpty().filter { it.isDirectory }.sortedBy { it.name }.mapNotNull { d ->
++      runCatching { File(d, "mod.txt").takeIf { it.isFile }?.readText() }.getOrNull()
++        ?.let { parseMod("user-${d.name}", it).copy(user = true) }
++    }
++    val userCheats = runCatching { File(user, "cheats.txt").takeIf { it.isFile }?.readText() }.getOrNull()
++      ?.let { parseCheats(it) }.orEmpty()
++    return GameMods(packed + userMods, packedCheats + userCheats)
++  }
++
++  /**
++   * Saves a mod the user pasted: its patch lines ("find <bytes> -> <bytes>" or
++   * "0xADDRESS: <bytes>") on their own, which go under [default.xbe], or a whole
++   * mod.txt. Returns its id.
++   */
++  fun saveUserMod(context: Context, gameKey: String, name: String, pasted: String): String {
++    val title = name.trim().ifEmpty { "Custom mod" }
++    val lines = pasted.lines()
++    val hasSection = lines.any { val t = it.trim(); t.startsWith("[") && t.endsWith("]") }
++    val hasName = lines.any { it.trim().lowercase(Locale.ROOT).startsWith("name:") }
++    val body = buildString {
++      if (!hasName) append("name: ").append(title).append('\n')
++      if (!hasSection) append("[default.xbe]\n")
++      append(pasted.trim()).append('\n')
++    }
++    val root = userDir(context, gameKey)
++    val slug = title.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "-").trim('-').ifEmpty { "mod" }
++    var folder = slug
++    var n = 2
++    while (File(root, folder).exists()) folder = "$slug-${n++}"
++    val dir = File(root, folder)
++    dir.mkdirs()
++    File(dir, "mod.txt").writeText(body)
++    return "user-$folder"
++  }
++
++  /** Removes a mod the user added (its id as load gives it). */
++  fun deleteUserMod(context: Context, gameKey: String, id: String) {
++    if (!id.startsWith("user-")) return
++    val dir = File(userDir(context, gameKey), id.removePrefix("user-"))
++    if (dir.parentFile?.name.equals(gameKey, ignoreCase = true)) dir.deleteRecursively()
+   }
+ 
+   private fun text(am: AssetManager, path: String): String? =
+@@ -224,22 +272,68 @@
+ object ModRun {
+   private const val TAG = "hakuX-mods"
+ 
+-  /** The manifest written (null: the game has none), and the run's cheats. */
+-  fun write(context: Context, gameKey: String): Pair<File, List<CheatInfo>>? {
++  /** A find line matching more places than this is skipped (a pattern too short to mean one place). */
++  private const val MAX_FIND_HITS = 64
++
++  /**
++   * The address patches of the "find" lines of default.xbe sections, by (XBE, line):
++   * each match of the bytes on the disc becomes "0xADDRESS: old -> new", which the
++   * core checks against the bytes it finds there. No match: none.
++   */
++  private fun resolveFinds(context: Context, disc: Uri, mods: List<ModInfo>): Map<Pair<String, String>, List<String>> {
++    val out = HashMap<Pair<String, String>, List<String>>()
++    XboxDisc.open(context, disc) { d ->
++      for (mod in mods) {
++        for ((xbe, line) in mod.patches) {
++          val key = xbe to line
++          val f = FindPatch.parse(line)
++          if (f == null || key in out) continue
++          if (!xbe.equals("default.xbe", ignoreCase = true)) {
++            Log.w(TAG, "${mod.id}: [$xbe] find lines work in [default.xbe] only")
++            out[key] = emptyList()
++            continue
++          }
++          val hits = d.findInXbe(f.find, f.findMask, MAX_FIND_HITS)
++          if (hits.isEmpty()) {
++            Log.w(TAG, "${mod.id}: \"$line\": no match on this disc, skipped")
++          } else if (hits.size > MAX_FIND_HITS) {
++            Log.w(TAG, "${mod.id}: \"$line\": more than $MAX_FIND_HITS matches, skipped")
++          }
++          out[key] = if (hits.isEmpty() || hits.size > MAX_FIND_HITS) {
++            emptyList<String>()
++          } else {
++            hits.map { (va, old) -> "0x%08X: %s -> %s".format(va, FindPatch.hex(old), FindPatch.hex(f.replacement(old))) }
++          }
++        }
++      }
++    }
++    return out
++  }
++
++  /**
++   * The manifest written (null: the game has none), and the run's cheats. disc is the
++   * game's image, to look for the bytes of "find" lines in its default.xbe.
++   */
++  fun write(context: Context, gameKey: String, disc: Uri? = null): Pair<File, List<CheatInfo>>? {
+     val game = ModCatalog.load(context, gameKey)
+     if (game.isEmpty) return null
+     val choices = ModChoices(context, gameKey)
+     val lines = mutableListOf<String>()
+     val on = game.mods.filter { choices.mod(it.id) }
+-    for (mod in on) {
+-      for ((disc, file) in ModCatalog.extract(context, gameKey, mod.id)) {
+-        lines += "file\t${disc.replace('/', '\\')}\t${file.absolutePath}"
++    for (mod in on.filter { !it.user }) {
++      for ((onDisc, file) in ModCatalog.extract(context, gameKey, mod.id)) {
++        lines += "file\t${onDisc.replace('/', '\\')}\t${file.absolutePath}"
+       }
+     }
++    val hasFinds = game.mods.any { m -> m.patches.any { FindPatch.parse(it.second) != null } }
++    val resolved = if (hasFinds && disc != null) resolveFinds(context, disc, game.mods) else emptyMap()
+     for (mod in game.mods) {
+       // a mod that is off too: a savestate saved with it on gets the disc's bytes back
+       val kind = if (mod in on) "patch" else "patchoff"
+-      for ((xbe, line) in mod.patches) lines += "$kind\t$xbe\t${mod.id}\t$line"
++      for ((xbe, line) in mod.patches) {
++        val patches = resolved[xbe to line] ?: if (FindPatch.parse(line) != null) emptyList<String>() else listOf(line)
++        for (p in patches) lines += "$kind\t$xbe\t${mod.id}\t$p"
++      }
+     }
+     on.maxOfOrNull { it.refresh }?.takeIf { it > 0 }?.let { lines += "refresh\t$it" }
+     for (c in game.cheats) {
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/data/XbePatterns.kt b/android/app/src/main/java/com/rfandango/haku_x/data/XbePatterns.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/data/XbePatterns.kt	1970-01-01 00:00:00.000000000 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/data/XbePatterns.kt	2026-11-06 12:06:49.455268255 +0000
+@@ -0,0 +1,60 @@
++package com.rfandango.haku_x.data
++
++/**
++ * A "find <bytes> -> <bytes>" line of a mod (mods/README.md): the bytes to look
++ * for in the XBE and what to write over them, as widescreen patch lists give
++ * them ("initial value", "change to"). "??" is a byte of any value; in the
++ * replacement it keeps the byte found. The core only knows patches at an
++ * address, so ModRun turns each match into one.
++ */
++class FindPatch(
++  val find: ByteArray,
++  val findMask: ByteArray,
++  private val repl: ByteArray,
++  private val replMask: ByteArray,
++) {
++  /** What is written where `found` matched: the replacement, a wildcard keeping the byte there. */
++  fun replacement(found: ByteArray): ByteArray =
++    ByteArray(repl.size) { if (replMask[it].toInt() == 0) found[it] else repl[it] }
++
++  companion object {
++    private const val MAX_BYTES = 256
++
++    /** The patch a line says, or null when it isn't a find line, or its two byte lists differ in length. */
++    fun parse(line: String): FindPatch? {
++      val t = line.trim()
++      if (!t.startsWith("find", ignoreCase = true)) return null
++      var rest = t.substring(4)
++      if (rest.isNotEmpty() && rest[0] != ':' && !rest[0].isWhitespace()) return null
++      if (rest.startsWith(":")) rest = rest.substring(1)
++      val parts = rest.substringBefore('#').split("->")
++      if (parts.size != 2) return null
++      val a = bytes(parts[0]) ?: return null
++      val b = bytes(parts[1]) ?: return null
++      if (a.first.size != b.first.size) return null
++      return FindPatch(a.first, a.second, b.first, b.second)
++    }
++
++    private fun isHex(c: Char) = c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F'
++
++    /** Hex pairs (spaces anywhere) and "??": the bytes and their masks (0xFF: must match, 0: any). */
++    private fun bytes(text: String): Pair<ByteArray, ByteArray>? {
++      val s = text.filter { !it.isWhitespace() }
++      if (s.isEmpty() || s.length % 2 != 0 || s.length / 2 > MAX_BYTES) return null
++      val value = ByteArray(s.length / 2)
++      val mask = ByteArray(s.length / 2)
++      for (i in value.indices) {
++        val hi = s[i * 2]
++        val lo = s[i * 2 + 1]
++        if (hi == '?' && lo == '?') continue
++        if (!isHex(hi) || !isHex(lo)) return null
++        value[i] = ((Character.digit(hi, 16) shl 4) or Character.digit(lo, 16)).toByte()
++        mask[i] = 0xFF.toByte()
++      }
++      return value to mask
++    }
++
++    /** Bytes as the patch lines write them: "DB 44 24 68". */
++    fun hex(bytes: ByteArray): String = bytes.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
++  }
++}
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/data/XboxDisc.kt b/android/app/src/main/java/com/rfandango/haku_x/data/XboxDisc.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/data/XboxDisc.kt	2026-11-06 12:06:49.398892153 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/data/XboxDisc.kt	2026-11-06 12:06:49.453439892 +0000
+@@ -115,6 +115,56 @@
+     return null
+   }
+ 
++  /**
++   * Where bytes occur in default.xbe's sections as the disc has them: find, with
++   * mask 0 for a byte of any value (else 0xFF). The virtual address of each
++   * match and the bytes there; limit + 1 matches at most, so more than limit
++   * means too many. A match doesn't overlap the one before it in its section.
++   */
++  fun findInXbe(find: ByteArray, mask: ByteArray, limit: Int): List<Pair<Long, ByteArray>> {
++    val x = xbe ?: return emptyList()
++    val n = find.size
++    if (n == 0 || mask.size != n) return emptyList()
++    val h = x.headers
++    val count = h.getInt(0x11C)
++    if (count !in 1..1024) return emptyList()
++    val table = headerOffset(x, h.getInt(0x120), count * 0x38) ?: return emptyList()
++    val out = ArrayList<Pair<Long, ByteArray>>()
++    for (i in 0 until count) {
++      val s = table + i * 0x38
++      val va = h.getInt(s + 0x04).toLong() and MASK
++      val raw = h.getInt(s + 0x0C).toLong() and MASK
++      val size = h.getInt(s + 0x10).toLong() and MASK
++      var pos = 0L
++      while (pos + n <= size) {
++        val len = minOf(SCAN_CHUNK, size - pos).toInt()
++        val buf = readAt(ch, x.start + raw + pos, len) ?: break
++        val data = buf.array()
++        var j = 0
++        while (j + n <= len) {
++          if (matchesAt(data, j, find, mask)) {
++            out.add((va + pos + j) to data.copyOfRange(j, j + n))
++            if (out.size > limit) return out
++            j += n
++          } else {
++            j++
++          }
++        }
++        if (pos + len >= size) break
++        pos += (len - (n - 1)).toLong()
++      }
++    }
++    return out
++  }
++
++  private fun matchesAt(data: ByteArray, at: Int, find: ByteArray, mask: ByteArray): Boolean {
++    for (k in find.indices) {
++      val m = mask[k].toInt() and 0xFF
++      if ((data[at + k].toInt() and 0xFF and m) != (find[k].toInt() and 0xFF)) return false
++    }
++    return true
++  }
++
+   /** A header address (a virtual address in the XBE) as an offset into the headers. */
+   private fun headerOffset(x: Xbe, va: Int, len: Int): Int? {
+     val off = (va.toLong() and MASK) - x.base
+@@ -139,6 +189,7 @@
+     private const val XBE_MAGIC = 0x48454258 // "XBEH"
+     private const val MASK = 0xFFFFFFFFL
+     private const val MAX_READ = 4L shl 20
++    private const val SCAN_CHUNK = 1L shl 20
+     private val PARTITIONS = longArrayOf(0L, 0x18300000L, 0xFD90000L, 0x2080000L)
+ 
+     /** Opens the image at uri and runs use on it; null when it isn't an Xbox disc or can't be read. */
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/library/LibraryScreen.kt b/android/app/src/main/java/com/rfandango/haku_x/ui/library/LibraryScreen.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/ui/library/LibraryScreen.kt	2026-11-06 12:06:49.401005213 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/library/LibraryScreen.kt	2026-11-06 12:06:49.458957756 +0000
+@@ -107,7 +107,6 @@
+ import com.rfandango.haku_x.data.DiscInfo
+ import com.rfandango.haku_x.data.Game
+ import com.rfandango.haku_x.data.GameOverrides
+-import com.rfandango.haku_x.data.ModCatalog
+ import com.rfandango.haku_x.data.SaveStateStore
+ import com.rfandango.haku_x.data.Updates
+ import com.rfandango.haku_x.data.XisoConverter
+@@ -370,7 +369,7 @@
+                 },
+               )
+             }
+-            if (disc != null && ModCatalog.has(context, key)) {
++            if (disc != null) {
+               DropdownMenuItem(
+                 text = { Text(stringResource(R.string.library_menu_mods)) },
+                 leadingIcon = { Icon(Icons.Filled.Star, contentDescription = null) },
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/mods/ModsScreen.kt b/android/app/src/main/java/com/rfandango/haku_x/ui/mods/ModsScreen.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/ui/mods/ModsScreen.kt	2026-11-06 12:06:49.401244325 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/mods/ModsScreen.kt	2026-11-06 12:06:49.459187451 +0000
+@@ -2,18 +2,31 @@
+ 
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.rememberScrollState
+ import androidx.compose.foundation.verticalScroll
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.Add
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.OutlinedTextField
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.mutableStateMapOf
++import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.unit.dp
+ import com.rfandango.haku_x.R
+ import com.rfandango.haku_x.data.ModCatalog
+ import com.rfandango.haku_x.data.ModChoices
++import com.rfandango.haku_x.ui.common.ActionItem
+ import com.rfandango.haku_x.ui.common.EmptyText
+ import com.rfandango.haku_x.ui.common.Hint
+ import com.rfandango.haku_x.ui.common.Section
+@@ -21,17 +34,22 @@
+ import com.rfandango.haku_x.ui.common.SwitchItem
+ 
+ /**
+- * One disc's mods and cheats (the repository's mods/ folder): each on or
+- * off. Mods take the next start; cheats also turn on and off in the game's
+- * menu while it runs.
++ * One disc's mods and cheats (the repository's mods/ folder, and the ones the
++ * user pasted in): each on or off. Mods take the next start; cheats also turn
++ * on and off in the game's menu while it runs.
+  */
+ @Composable
+ fun ModsScreen(gameKey: String, title: String, onBack: () -> Unit) {
+   val context = LocalContext.current
+-  val game = remember(gameKey) { ModCatalog.load(context, gameKey) }
++  // bumped when a mod is added or removed: the lists are read again
++  var version by remember { mutableIntStateOf(0) }
++  var adding by remember { mutableStateOf(false) }
++  val game = remember(gameKey, version) { ModCatalog.load(context, gameKey) }
+   val choices = remember(gameKey) { ModChoices(context, gameKey) }
+-  val mods = remember(gameKey) { mutableStateMapOf<String, Boolean>().apply { game.mods.forEach { put(it.id, choices.mod(it.id)) } } }
+-  val cheats = remember(gameKey) {
++  val mods = remember(gameKey, version) {
++    mutableStateMapOf<String, Boolean>().apply { game.mods.forEach { put(it.id, choices.mod(it.id)) } }
++  }
++  val cheats = remember(gameKey, version) {
+     mutableStateMapOf<String, Boolean>().apply { game.cheats.forEach { put(it.name, choices.cheat(it.name)) } }
+   }
+ 
+@@ -54,6 +72,16 @@
+               mods[mod.id] = v
+             },
+           )
++          if (mod.user) {
++            TextButton(
++              onClick = {
++                choices.setMod(mod.id, false)
++                ModCatalog.deleteUserMod(context, gameKey, mod.id)
++                version++
++              },
++              modifier = Modifier.padding(start = 8.dp),
++            ) { Text(stringResource(R.string.mods_remove)) }
++          }
+         }
+       }
+       if (game.cheats.isNotEmpty()) {
+@@ -71,6 +99,62 @@
+           )
+         }
+       }
++      Section(stringResource(R.string.mods_section_yours))
++      ActionItem(
++        title = stringResource(R.string.mods_add),
++        summary = stringResource(R.string.mods_add_summary),
++        icon = Icons.Filled.Add,
++        onClick = { adding = true },
++      )
+     }
+   }
++
++  if (adding) {
++    AddModDialog(
++      onSave = { name, text ->
++        val id = ModCatalog.saveUserMod(context, gameKey, name, text)
++        choices.setMod(id, true)
++        adding = false
++        version++
++      },
++      onDismiss = { adding = false },
++    )
++  }
++}
++
++/** A mod pasted in: its name and its patch lines (or a whole mod.txt). */
++@Composable
++private fun AddModDialog(onSave: (String, String) -> Unit, onDismiss: () -> Unit) {
++  var name by remember { mutableStateOf("") }
++  var text by remember { mutableStateOf("") }
++  AlertDialog(
++    onDismissRequest = onDismiss,
++    title = { Text(stringResource(R.string.mods_add)) },
++    text = {
++      Column(Modifier.verticalScroll(rememberScrollState())) {
++        OutlinedTextField(
++          value = name,
++          onValueChange = { name = it },
++          label = { Text(stringResource(R.string.mods_add_name)) },
++          singleLine = true,
++          modifier = Modifier.fillMaxWidth(),
++        )
++        OutlinedTextField(
++          value = text,
++          onValueChange = { text = it },
++          label = { Text(stringResource(R.string.mods_add_patches)) },
++          minLines = 6,
++          maxLines = 12,
++          modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
++        )
++        Hint(stringResource(R.string.mods_add_help))
++      }
++    },
++    confirmButton = {
++      TextButton(enabled = text.isNotBlank(), onClick = { onSave(name, text) }) {
++        Text(stringResource(R.string.mods_add_save))
++      }
++    },
++    dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) } },
++  )
+ }
+diff -ruN a/android/app/src/main/res/values/strings.xml b/android/app/src/main/res/values/strings.xml
+--- a/android/app/src/main/res/values/strings.xml	2026-11-06 12:06:49.405809582 +0000
++++ b/android/app/src/main/res/values/strings.xml	2026-11-06 12:06:49.467511264 +0000
+@@ -312,11 +312,19 @@
+   <string name="library_menu_load_state">Load state</string>
+   <string name="library_menu_mods">Mods &amp; cheats</string>
+   <string name="mods_title">Mods &amp; cheats</string>
+-  <string name="mods_none">This disc has no mods or cheats.</string>
++  <string name="mods_none">This disc has no mods or cheats yet.</string>
+   <string name="mods_section_mods">Mods</string>
+   <string name="mods_mods_desc">Mods change the game\'s files. A change takes effect the next time the game starts.</string>
+   <string name="mods_by">by %1$s</string>
+   <string name="mods_section_cheats">Cheats</string>
++  <string name="mods_section_yours">Your own</string>
++  <string name="mods_add">Add a mod</string>
++  <string name="mods_add_summary">Paste patch lines, such as a widescreen patch</string>
++  <string name="mods_add_name">Name</string>
++  <string name="mods_add_patches">Patch lines</string>
++  <string name="mods_add_help">One patch per line: find DB44 85C9 -> DB44 9090 searches the game\'s XBE for the first bytes and writes the second ones; 0x0011A2B4: 90 90 writes at an address. A whole mod.txt works too. The mod takes effect the next time the game starts.</string>
++  <string name="mods_add_save">Add</string>
++  <string name="mods_remove">Remove</string>
+   <string name="mods_cheats_desc">Cheats can also be turned on and off from the in-game menu.</string>
+   <string name="overlay_menu_cheats">Cheats</string>
+   <string name="migrate_title">hakuX has a new core</string>
+diff -ruN a/mods/46530002.2/widescreen/mod.txt b/mods/46530002.2/widescreen/mod.txt
+--- a/mods/46530002.2/widescreen/mod.txt	1970-01-01 00:00:00.000000000 +0000
++++ b/mods/46530002.2/widescreen/mod.txt	2026-11-06 12:06:49.487309540 +0000
+@@ -0,0 +1,16 @@
++name: Widescreen
++description: 16:9 view for stages and cutscenes (the bars of the cutscenes go). Set the aspect ratio to 16:9 or Stretch in the game's settings.
++
++# Byte patterns, not addresses: "find <bytes> -> <bytes>" searches the XBE for
++# the first bytes and writes the second ones there (every match, up to 64).
++# A pattern that isn't found (another release of the game) is skipped and
++# logged. From a widescreen patch list for Otogi: Myth of Demons (46530002).
++[default.xbe]
++# value 1
++find DB442468 85C97D06 D805BC44 1700DEF9 8B151868 -> DB442468 90909090 D80D7444 1700DEF9 8B151868
++# value 2
++find DB442454 85C97D06 D805BC44 1700DEF9 8B151868 -> DB442454 90909090 D80D7444 1700DEF9 8B151868
++# render fix
++find 85C07D06 D805BC44 1700DEF9 518B0D18 -> 90909090 D8357444 1700DEF9 518B0D18
++# cutscenes letterbox fix
++find 2C3E0000 00C74424 10000000 00C74424 14A20100 -> 2C000000 00C74424 10000000 00C74424 14E00100
+diff -ruN a/mods/README.md b/mods/README.md
+--- a/mods/README.md	2026-11-06 12:06:49.419274885 +0000
++++ b/mods/README.md	2026-11-06 12:06:49.492601533 +0000
+@@ -46,6 +46,18 @@
+   checks the bytes first: a patch whose bytes differ is skipped and logged
+   (the wrong disc or another mod's patch). Patches change the XBE as it is
+   read, so sections the game loads later are patched too.
++- `find <bytes> -> <bytes>` is a patch without an address, as widescreen
++  patch lists give them ("initial value" and "change to"). When the game
++  starts, the app searches the disc's `default.xbe` sections for the first
++  bytes and turns every match (up to 64) into an `address: old -> new` patch.
++  Spaces between the hex pairs are free; `??` is a byte of any value (in the
++  second bytes: keep it as it is). Both must be the same length. A pattern that
++  matches nowhere (another release of the game) writes nothing; one that
++  matches more than 64 places too. Only in `[default.xbe]`.
++  ```
++  [default.xbe]
++  find DB442468 85C97D06 D805BC44 -> DB442468 90909090 D80D7444
++  ```
+ - `[$u\default.xbe]` starts the patches of the game's Xbox Live title
+   update (`E:\TDATA\<title ID>\$u\default.xbe`, which boots instead of the
+   disc's once installed), in the same mod: its addresses differ from the
+@@ -62,6 +74,12 @@
+   `tools/mods/` holds the generators (`doa2_120fps.py` writes
+   `54430006.6/120fps/mod.txt` from the game's XBE).
+ 
++A mod can also be added in the app, without a new build: the library's
++long-press menu, **Mods & cheats**, **Add a mod** takes patch lines pasted in
++(or a whole `mod.txt`). They are kept in the app's storage
++(`user_mods/<GAME KEY>/<mod>/mod.txt`, and a `cheats.txt` beside them is read
++too) and listed after the packed mods, with a Remove button.
++
+ ## Cheats (`cheats.txt`)
+ 
+ ```
