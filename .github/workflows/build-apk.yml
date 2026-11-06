@@ -29,21 +29,36 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Apply swipe to look
+
+      - name: Apply swipe to look and widescreen mods
         run: |
           set -euo pipefail
-          patch_file=$(ls swipe-look*.patch 2>/dev/null | head -n 1 || true)
-          if [ -z "$patch_file" ]; then
-            echo "ERROR: no swipe-look-ci.patch in the repository's top folder. Upload it (Add file > Upload files) and run again."
-            exit 1
-          fi
-          echo "Using $patch_file"
-          if ! patch -p1 -F0 --dry-run < "$patch_file" > /tmp/dry-run.txt; then
-            cat /tmp/dry-run.txt
-            echo "ERROR: the patch does not fit this version of the source (the original changed these files since the patch was made). Send this log to whoever made the patch."
-            exit 1
-          fi
-          patch -p1 -F0 < "$patch_file"
+
+          patch_files=(
+            "swipe-look-ci.patch"
+            "hakuX-widescreen-find.patch"
+          )
+
+          for patch_file in "${patch_files[@]}"; do
+            if [ ! -f "$patch_file" ]; then
+              echo "ERROR: Missing patch file: $patch_file"
+              echo "Upload both patch files to the repository's top folder."
+              exit 1
+            fi
+
+            echo "Checking $patch_file"
+
+            if ! patch -p1 -F0 --dry-run < "$patch_file"; then
+              echo "ERROR: Patch cannot be applied: $patch_file"
+              exit 1
+            fi
+
+            echo "Applying $patch_file"
+            patch -p1 -F0 < "$patch_file"
+          done
+
+          echo "Both patches applied successfully!"
+
 
       - name: Take the native libraries from the release APK
         env:
