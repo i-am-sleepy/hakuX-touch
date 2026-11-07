@@ -83,8 +83,32 @@ jobs:
           clone https://github.com/bylaws/libadrenotools.git 8fae8ce "$deps/adrenotools"
           git -C "$deps/adrenotools" submodule update --init --recursive
           git -C "$deps/adrenotools" apply "$GITHUB_WORKSPACE/tools/native/adrenotools-kgsl-context-priority.patch"
-          clone https://github.com/abaire/nv2a_vsh_cpu.git 561fe80 "$deps/root/subprojects/nv2a_vsh_cpu"
+          # nv2a_vsh_cpu: the revision the core was written against, which can sit
+          # on a branch the clone doesn't bring (a pull request's); failing
+          # that, the default branch (the check below says if it won't do)
+          export GIT_TERMINAL_PROMPT=0
+          vsh="$deps/root/subprojects/nv2a_vsh_cpu"
+          git clone --quiet https://github.com/abaire/nv2a_vsh_cpu.git "$vsh"
+          if ! git -C "$vsh" checkout --quiet 561fe80; then
+            git -C "$vsh" fetch --quiet origin '+refs/*:refs/remotes/all/*' || true
+            git -C "$vsh" checkout --quiet 561fe80 || echo "::warning::nv2a_vsh_cpu 561fe80 is not in the repository: using the default branch"
+          fi
+          git -C "$vsh" log -1 --format='nv2a_vsh_cpu at %h (%cd)'
           clone https://gitlab.freedesktop.org/slirp/libslirp.git v4.7.0 "$deps/libslirp"
+          # everything the build reads, checked here instead of one error per run
+          missing=0
+          for f in volk/volk.c spirv_reflect/spirv_reflect.c glslang/CMakeLists.txt vma/include/vk_mem_alloc.h \
+                   SDL3/CMakeLists.txt adrenotools/CMakeLists.txt libslirp/src \
+                   root/subprojects/nv2a_vsh_cpu/src/nv2a_vsh_emulator.c \
+                   root/subprojects/nv2a_vsh_cpu/src/nv2a_vsh_disassembler.c \
+                   root/subprojects/nv2a_vsh_cpu/src/nv2a_vsh_cpu.c \
+                   root/subprojects/nv2a_vsh_cpu/src/nv2a_vsh_emulator_execution_state.c; do
+            [ -e "$deps/$f" ] || { echo "::error::missing $f"; missing=1; }
+          done
+          for fn in nv2a_vsh_emu_initialize_xss_execution_state nv2a_vsh_emu_execute_track_context_writes nv2a_vsh_parse_program; do
+            grep -rq "$fn" "$vsh/src" || { echo "::error::nv2a_vsh_cpu has no $fn: another revision is needed"; missing=1; }
+          done
+          [ "$missing" = 0 ] || exit 1
           echo "NC_DEPS=$deps" >> "$GITHUB_ENV"
 
       - name: Fetch the FEX fork
