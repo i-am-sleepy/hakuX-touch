@@ -14,7 +14,19 @@
  import com.rfandango.haku_x.ui.theme.AppTheme
  import java.io.File
  import java.util.TimeZone
-@@ -697,6 +700,13 @@
+@@ -242,8 +245,9 @@
+     }
+     /* The HLE GPU's render scale, 1-4x the title's resolution. */
+     args += "scale=${settings.renderScale}"
+-    /* The picture's shape: auto (the game's), 4:3, 16:9 or stretch. */
+-    args += "aspect=${settings.aspectRatio}"
++    /* The picture's shape: auto (the game's), 4:3, 16:9 or stretch. "16:9 stretched" places it as stretch does
++     * (the whole screen); that the game then renders at 16:9 is the console's video format (videoFlags). */
++    args += "aspect=${if (settings.aspectRatio == ASPECT_WIDE_STRETCH) "stretch" else settings.aspectRatio}"
+     /* Anti-aliasing: FXAA over each frame, and how a picture smaller than
+      * the screen is scaled up (a larger one is averaged down). */
+     args += "fxaa=${if (settings.fxaa) 1 else 0}"
+@@ -697,6 +701,13 @@
      overlay.setControllerListener(OverlayBridge())
      overlay.onMenuButtonTapped = { showMenu() }
      overlay.drawGate = overlayPacer::mayDraw
@@ -28,7 +40,7 @@
      mLayout?.addView(overlay)
      overlayPacer.attach(overlay)
      onScreenController = overlay
-@@ -748,7 +758,15 @@
+@@ -748,7 +759,15 @@
          updateControllerVisibility()
        },
        getString(R.string.overlay_menu_controllers) to ::showPlayers,
@@ -44,7 +56,7 @@
      if (states) {
        items += getString(R.string.overlay_menu_save_state) to { saveStates.showSlots(save = true) }
        items += getString(R.string.overlay_menu_load_state) to { saveStates.showSlots(save = false) }
-@@ -835,9 +853,233 @@
+@@ -835,9 +854,233 @@
        .setNegativeButton(android.R.string.cancel, null))
    }
  
@@ -278,6 +290,16 @@
      overlay.minimal = false
      overlay.editing = true
      val bar = OverlayEditorBar(this, overlay) { closeEditor() }
+@@ -1149,6 +1392,9 @@
+     const val DEFAULT_SCALE = 1
+     const val PREF_ASPECT = "aspect_ratio"
+     const val ASPECT_AUTO = "auto"
++
++    /** Widescreen games render at 16:9, and the picture fills the screen beyond that. */
++    const val ASPECT_WIDE_STRETCH = "16:9-stretch"
+     const val PREF_FXAA = "fxaa"
+     const val PREF_UPSCALE = "upscale_filter"
+     const val UPSCALE_BILINEAR = "bilinear"
 --- a/android/app/src/main/java/com/rfandango/haku_x/OnScreenController.kt
 +++ b/android/app/src/main/java/com/rfandango/haku_x/OnScreenController.kt
 @@ -9,12 +9,19 @@
@@ -904,6 +926,31 @@
      val ACCENT = 0xFF8BC34A.toInt()
      val DPAD_BUTTONS = listOf(
        ControlPainter.DPAD_UP to Button.DPAD_UP,
+--- a/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt
++++ b/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt
+@@ -4,6 +4,7 @@
+ import android.content.Context
+ import androidx.core.content.edit
+ import com.rfandango.haku_x.BuildConfig
++import com.rfandango.haku_x.NativeCoreActivity
+ import java.util.Locale
+ 
+ /** The settings a game can override; the rest are the app's for every game. */
+@@ -102,6 +103,13 @@
+   val pal60 get() = bool(GameSetting.PAL60, app.pal60)
+   val avPack get() = text(GameSetting.AV_PACK, app.avPack)
+ 
+-  fun videoFlags(): Int = AppPrefs.videoFlags(screenFormat, video480p, video720p, video1080i, pal60)
++  /**
++   * The console's video format: the setting, except that "16:9 stretched" puts the console in widescreen,
++   * so the games that support it render at 16:9 (the picture is then stretched over the screen).
++   */
++  private val consoleFormat
++    get() = if (aspectRatio == NativeCoreActivity.ASPECT_WIDE_STRETCH) AppPrefs.FORMAT_WIDESCREEN else screenFormat
++
++  fun videoFlags(): Int = AppPrefs.videoFlags(consoleFormat, video480p, video720p, video1080i, pal60)
+   fun xboxLanguage(): Int = AppPrefs.xboxLanguage(language)
+ }
 --- a/android/app/src/main/java/com/rfandango/haku_x/data/TouchLook.kt
 +++ b/android/app/src/main/java/com/rfandango/haku_x/data/TouchLook.kt
 @@ -0,0 +1,252 @@
@@ -2009,6 +2056,23 @@
  
        Section(stringResource(R.string.settings_section_display))
        ListItem(
+@@ -493,7 +494,7 @@
+ @Composable
+ internal fun scaleLabel(value: Int) = if (value == 1) stringResource(R.string.settings_scale_native) else "${value}x"
+ 
+-internal val ASPECTS = listOf("auto", "4:3", "16:9", "stretch")
++internal val ASPECTS = listOf("auto", "4:3", "16:9", "stretch", NativeCoreActivity.ASPECT_WIDE_STRETCH)
+ 
+ internal val UPSCALERS = listOf(NativeCoreActivity.UPSCALE_BILINEAR, NativeCoreActivity.UPSCALE_SGSR)
+ internal val FORMATS = listOf(AppPrefs.FORMAT_NORMAL, AppPrefs.FORMAT_LETTERBOX, AppPrefs.FORMAT_WIDESCREEN)
+@@ -577,6 +578,7 @@
+   "4:3" -> R.string.settings_aspect_4_3
+   "16:9" -> R.string.settings_aspect_16_9
+   "stretch" -> R.string.settings_aspect_stretch
++  NativeCoreActivity.ASPECT_WIDE_STRETCH -> R.string.settings_aspect_wide_stretch
+   else -> R.string.settings_aspect_auto
+ }
+ 
 --- a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/TouchLookSettings.kt
 +++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/TouchLookSettings.kt
 @@ -0,0 +1,320 @@
@@ -2334,7 +2398,17 @@
 +}
 --- a/android/app/src/main/res/values/strings.xml
 +++ b/android/app/src/main/res/values/strings.xml
-@@ -293,7 +293,86 @@
+@@ -190,7 +190,8 @@
+   <string name="settings_aspect_auto">Auto (the game\'s own; 16:9 when the console is widescreen)</string>
+   <string name="settings_aspect_4_3">4:3</string>
+   <string name="settings_aspect_16_9">16:9 (widescreen games)</string>
+-  <string name="settings_aspect_stretch">Stretch to the screen</string>
++  <string name="settings_aspect_stretch">Stretch to the screen (the picture the game gives, whatever the screen format)</string>
++  <string name="settings_aspect_wide_stretch">16:9, stretched to the screen (widescreen games render at 16:9, then fill the display)</string>
+   <string name="settings_fxaa">FXAA anti-aliasing</string>
+   <string name="settings_fxaa_desc">Smooths jagged edges of each frame. Most useful at low resolution scales: a scale above the screen\'s already smooths them.</string>
+   <string name="settings_upscale">Upscaling filter</string>
+@@ -293,7 +294,86 @@
    <string name="overlay_editor_tools">▼  Tools</string>
    <string name="settings_section_controls">Controls</string>
    <string name="settings_overlay">On-screen controls</string>
