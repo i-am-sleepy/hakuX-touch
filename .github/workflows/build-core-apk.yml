@@ -83,8 +83,7 @@ jobs:
           }
           clone https://github.com/zeux/volk.git 1.4.304 "$deps/volk"
           clone https://github.com/KhronosGroup/glslang.git 16.1.0 "$deps/glslang"
-          clone https://github.com/KhronosGroup/SPIRV-Reflect.git vuldone
-          sdk-1.4.328.0 "$deps/spirv_reflect"
+          clone https://github.com/KhronosGroup/SPIRV-Reflect.git vulkan-sdk-1.4.328.0 "$deps/spirv_reflect"
           clone https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git v3.3.0 "$deps/vma"
           clone https://github.com/libsdl-org/SDL.git release-3.4.18 "$deps/SDL3"
           clone https://github.com/bylaws/libadrenotools.git 8fae8ce "$deps/adrenotools"
