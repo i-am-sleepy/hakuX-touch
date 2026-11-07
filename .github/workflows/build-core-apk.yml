@@ -53,15 +53,11 @@ jobs:
               echo "ERROR: $p does not fit this source (or another patch changed the same lines)."
               exit 1
             fi
-            patch -p1 -F0 < "$p"
+            patch -p1 -F0 --no-backup-if-mismatch < "$p"
           done
-          
-      - name: Remove unwanted Android resource backups
-        run: |
-          find android/app/src/main/res -type f \
-            \( -name "*.orig" -o -name "*.rej" -o -name "*~" \) \
-            -print -delete
-            
+          # backups a patch may leave would end up in the app's resources
+          find android -type f \( -name "*.orig" -o -name "*.rej" \) -print -delete
+
       - name: Install the Android SDK parts and the build tools
         run: |
           set -euo pipefail
@@ -89,17 +85,12 @@ jobs:
           clone https://github.com/bylaws/libadrenotools.git 8fae8ce "$deps/adrenotools"
           git -C "$deps/adrenotools" submodule update --init --recursive
           git -C "$deps/adrenotools" apply "$GITHUB_WORKSPACE/tools/native/adrenotools-kgsl-context-priority.patch"
-          # nv2a_vsh_cpu: the revision the core was written against, which can sit
-          # on a branch the clone doesn't bring (a pull request's); failing
-          # that, the default branch (the check below says if it won't do)
-          export GIT_TERMINAL_PROMPT=0
+          # nv2a_vsh_cpu at the commit xemu pins (561fe80da57a881f89000256b459440c0178a7ce),
+          # which is on no branch: only the archive of the full hash gets it
           vsh="$deps/root/subprojects/nv2a_vsh_cpu"
-          git clone --quiet https://github.com/abaire/nv2a_vsh_cpu.git "$vsh"
-          if ! git -C "$vsh" checkout --quiet 561fe80; then
-            git -C "$vsh" fetch --quiet origin '+refs/*:refs/remotes/all/*' || true
-            git -C "$vsh" checkout --quiet 561fe80 || echo "::warning::nv2a_vsh_cpu 561fe80 is not in the repository: using the default branch"
-          fi
-          git -C "$vsh" log -1 --format='nv2a_vsh_cpu at %h (%cd)'
+          mkdir -p "$vsh"
+          curl -fsSL https://github.com/abaire/nv2a_vsh_cpu/archive/561fe80da57a881f89000256b459440c0178a7ce.tar.gz \
+            | tar xz -C "$vsh" --strip-components=1
           clone https://gitlab.freedesktop.org/slirp/libslirp.git v4.7.0 "$deps/libslirp"
           # everything the build reads, checked here instead of one error per run
           missing=0
@@ -144,14 +135,7 @@ jobs:
           ninja -C build/native/core hakuxcore
           ccache -s || true
           bash tools/native/app-libs.sh
-          
-      - name: Check Android resource filenames
-        run: |
-          echo "Checking Android resources..."
-          find android/app/src/main/res -type f \
-            \( -name "*.orig" -o -name "*.rej" -o -name "*~" \) \
-            -print
-            
+
       - name: Build the APK
         working-directory: android
         run: |
