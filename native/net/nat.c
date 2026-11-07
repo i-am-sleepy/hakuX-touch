@@ -25,6 +25,7 @@
 #include <poll.h>
 #include <string.h>
 #include <time.h>
+#include <sys/types.h>
 
 #define INSIGNIA_DNS "46.101.64.175"
 #define TIMERS 4
@@ -53,10 +54,10 @@ static int64_t now_ns(void)
 
 /* ------------------------------------------------- libslirp's callbacks */
 
-static slirp_ssize_t cb_send_packet(const void *buf, size_t len, void *opaque)
+static ssize_t cb_send_packet(const void *buf, size_t len, void *opaque)
 {
     nc_net_deliver(buf, len);
-    return (slirp_ssize_t)len;
+    return (ssize_t)len;
 }
 
 static void cb_guest_error(const char *msg, void *opaque)
