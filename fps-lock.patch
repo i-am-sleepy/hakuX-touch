@@ -1,0 +1,261 @@
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt b/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt	2026-11-07 00:01:34.251712954 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt	2026-11-07 00:01:28.300749549 +0000
+@@ -236,8 +236,11 @@
+     }
+     /* The app's settings, under this game's overrides. */
+     val settings = RunSettings(AppPrefs(this), gameOverrides())
+-    /* Every frame presented at once, no vblank wait: on by default. */
+-    if (settings.uncapped) {
++    /* Every frame presented at once, no vblank wait: on by default. The FPS
++     * lock (the console's refresh rate in Hz) takes its place. */
++    if (settings.fpsLock > 0) {
++      args += "fps=${settings.fpsLock}"
++    } else if (settings.uncapped) {
+       args += "uncap"
+     }
+     /* The HLE GPU's render scale, 1-4x the title's resolution. */
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt b/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt	2026-11-07 00:01:34.251896953 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt	2026-11-07 00:01:28.300936637 +0000
+@@ -90,6 +90,11 @@
+     get() = sp.getInt(NativeCoreActivity.PREF_SCALE, NativeCoreActivity.DEFAULT_SCALE)
+     set(value) = sp.edit { putInt(NativeCoreActivity.PREF_SCALE, value) }
+ 
++  /** The FPS lock: the console's refresh rate in Hz (read at game start), 0: none. */
++  var fpsLock: Int
++    get() = sp.getInt(KEY_FPS_LOCK, 0)
++    set(value) = sp.edit { putInt(KEY_FPS_LOCK, value) }
++
+   /** The picture's shape: auto, 4:3, 16:9 or stretch (read at game start). */
+   var aspectRatio: String
+     get() = sp.getString(NativeCoreActivity.PREF_ASPECT, NativeCoreActivity.ASPECT_AUTO) ?: NativeCoreActivity.ASPECT_AUTO
+@@ -235,6 +240,7 @@
+     private const val KEY_SETUP_COMPLETE = "setup_complete"
+     private const val KEY_PREVIOUS_MIGRATED = "previous_version_migrated"
+     private const val KEY_SHOW_FPS = "show_fps"
++    private const val KEY_FPS_LOCK = "fps_lock"
+     private const val KEY_CONSOLE_TIMING = "console_timing"
+     private const val KEY_THEME = "app_theme"
+     private const val KEY_TURNIP_NOTE = "turnip_note_shown"
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt b/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt	2026-11-07 00:01:34.252000669 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt	2026-11-07 00:01:28.301015665 +0000
+@@ -10,6 +10,7 @@
+ enum class GameSetting(val key: String) {
+   UNCAPPED("uncapped"),
+   RENDER_SCALE("render_scale"),
++  FPS_LOCK("fps_lock"),
+   ASYNC_SHADERS("async_shaders"),
+   PREBUILD_SHADERS("prebuild_shaders"),
+   CONSOLE_TIMING("console_timing"),
+@@ -87,6 +88,7 @@
+ 
+   val uncapped get() = bool(GameSetting.UNCAPPED, app.uncapped)
+   val renderScale get() = game?.get(GameSetting.RENDER_SCALE)?.toIntOrNull() ?: app.renderScale
++  val fpsLock get() = game?.get(GameSetting.FPS_LOCK)?.toIntOrNull() ?: app.fpsLock
+   val asyncShaders get() = bool(GameSetting.ASYNC_SHADERS, app.asyncShaders)
+   val prebuildShaders get() = bool(GameSetting.PREBUILD_SHADERS, app.prebuildShaders)
+   /** A debug build's setting (off for A/B); always on in the others. */
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.kt b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.kt	1970-01-01 00:00:00.000000000 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.kt	2026-11-07 00:01:28.302077475 +0000
+@@ -0,0 +1,12 @@
++package com.rfandango.haku_x.ui.settings
++
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.res.stringResource
++import com.rfandango.haku_x.R
++
++/** The FPS lock's rates in Hz; 0: none. */
++internal val FPS_LOCKS = listOf(0, 30, 45, 60, 90, 120, 144)
++
++@Composable
++internal fun fpsLockLabel(value: Int) =
++  if (value == 0) stringResource(R.string.settings_fps_lock_off) else stringResource(R.string.settings_fps_lock_value, value)
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSettingsScreen.kt b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSettingsScreen.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSettingsScreen.kt	2026-11-07 00:01:34.253041521 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSettingsScreen.kt	2026-11-07 00:01:28.302034562 +0000
+@@ -47,6 +47,7 @@
+ private val SECTIONS: List<Pair<Int, List<Overridable>>> = listOf(
+   R.string.settings_section_display to listOf(
+     Overridable(GameSetting.UNCAPPED, R.string.settings_uncap, ON_OFF, { it.uncapped.toString() }, { onOff(it) }),
++    Overridable(GameSetting.FPS_LOCK, R.string.settings_fps_lock, FPS_LOCKS.map { "$it" }, { it.fpsLock.toString() }, { fpsLockLabel(it.toInt()) }),
+     Overridable(GameSetting.ASPECT, R.string.settings_aspect, ASPECTS, { it.aspectRatio }, { stringResource(aspectLabel(it)) }),
+   ),
+   R.string.settings_section_graphics to listOf(
+diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt
+--- a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt	2026-11-07 00:01:34.253080501 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt	2026-11-07 00:01:28.302059916 +0000
+@@ -87,6 +87,8 @@
+   var showFps by remember { mutableStateOf(prefs.showFps) }
+   var showHitches by remember { mutableStateOf(prefs.showHitches) }
+   var scale by remember { mutableIntStateOf(prefs.renderScale) }
++  var fpsLock by remember { mutableIntStateOf(prefs.fpsLock) }
++  var fpsLockDialog by remember { mutableStateOf(false) }
+   var aspect by remember { mutableStateOf(prefs.aspectRatio) }
+   var fxaa by remember { mutableStateOf(prefs.fxaa) }
+   var upscale by remember { mutableStateOf(prefs.upscaleFilter) }
+@@ -192,6 +194,16 @@
+         onChange = { uncapped = it; prefs.uncapped = it },
+       )
+       ListItem(
++        headlineContent = { Text(stringResource(R.string.settings_fps_lock)) },
++        supportingContent = {
++          Text(
++            fpsLockLabel(fpsLock) + ". " + stringResource(R.string.settings_fps_lock_desc) + " " +
++              stringResource(R.string.settings_applies_next_start),
++          )
++        },
++        modifier = Modifier.clickable { fpsLockDialog = true },
++      )
++      ListItem(
+         headlineContent = { Text(stringResource(R.string.settings_aspect)) },
+         supportingContent = {
+           Text(stringResource(aspectLabel(aspect)) + ". " + stringResource(R.string.settings_applies_next_start))
+@@ -426,6 +438,15 @@
+       onDismiss = { cableDialog = false },
+     )
+   }
++  if (fpsLockDialog) {
++    ChoiceDialog(
++      title = stringResource(R.string.settings_fps_lock),
++      options = FPS_LOCKS.map { it to fpsLockLabel(it) },
++      current = fpsLock,
++      onPick = { fpsLock = it; prefs.fpsLock = it; fpsLockDialog = false },
++      onDismiss = { fpsLockDialog = false },
++    )
++  }
+   if (aspectDialog) {
+     ChoiceDialog(
+       title = stringResource(R.string.settings_aspect),
+diff -ruN a/android/app/src/main/res/values/strings.xml b/android/app/src/main/res/values/strings.xml
+--- a/android/app/src/main/res/values/strings.xml	2026-11-07 00:01:34.254896124 +0000
++++ b/android/app/src/main/res/values/strings.xml	2026-11-07 00:01:28.305082083 +0000
+@@ -177,6 +177,10 @@
+   <string name="settings_export_logs_failed">Couldn\'t export the logs</string>
+   <string name="settings_uncap">Uncapped frame rate</string>
+   <string name="settings_uncap_desc">Present every frame at once instead of waiting for the display.</string>
++  <string name="settings_fps_lock">FPS lock</string>
++  <string name="settings_fps_lock_desc">Sets the console\'s refresh rate. A game that counts frames runs faster or slower with it, and it replaces the uncapped frame rate.</string>
++  <string name="settings_fps_lock_off">Off</string>
++  <string name="settings_fps_lock_value">%1$d fps</string>
+   <string name="settings_scale">Resolution scale</string>
+   <string name="settings_scale_value">%1$dx the game\'s resolution</string>
+   <string name="settings_scale_native">1x (native)</string>
+diff -ruN a/native/core/options.c b/native/core/options.c
+--- a/native/core/options.c	2026-11-07 00:01:34.260331583 +0000
++++ b/native/core/options.c	2026-11-07 00:01:28.311889107 +0000
+@@ -5,6 +5,7 @@
+ #include "native/core/options.h"
+ #include "native/core/core.h"
+ #include "native/core/mods.h"
++#include "native/dev/dev.h"
+ #include "native/hle/hle_native.h"
+ #include "native/kernel/kernel.h"
+ #include "native/net/net.h"
+@@ -31,6 +32,8 @@
+         /* net=, dns=, lanport=, lanbcast=, lanpeers=, kai= (native/net/net.h) */
+     } else if (!strcmp(arg, "uncap")) {
+         o->uncap = true;
++    } else if ((v = value(arg, "fps="))) {
++        o->fps = (unsigned)atoi(v);
+     } else if (!strcmp(arg, "relaunch")) {
+         nc_core_set_relaunch(true);
+     } else if (!strcmp(arg, "dash")) {
+@@ -82,7 +85,8 @@
+     if (o->video >= 0) {
+         nc_log("hakuX-app", "video flags %08llx, AV pack %d", (unsigned long long)o->video, o->av_pack);
+     }
+-    if (o->uncap) {
++    nc_dev_nv2a_lock_rate(o->fps);
++    if (o->uncap && !o->fps) {
+         setenv("HAKUX_HLE_UNCAP", "1", 1);
+     } else {
+         unsetenv("HAKUX_HLE_UNCAP");
+diff -ruN a/native/core/options.h b/native/core/options.h
+--- a/native/core/options.h	2026-11-07 00:01:34.260344178 +0000
++++ b/native/core/options.h	2026-11-07 00:01:28.311901071 +0000
+@@ -4,6 +4,9 @@
+  *
+  *   uncap            every frame presented at once, without waiting for
+  *                    vblank (the HLE GPU's HAKUX_HLE_UNCAP)
++ *   fps=N            lock the console's vblank at N Hz (15-240), whatever its
++ *                    video mode; frame-locked titles run at N/60 of their speed.
++ *                    It replaces uncap
+  *   relaunch         a title's reboot into another of its XBEs
+  *   loadstate=FILE   boot into a savestate (native/state)
+  *   mods=FILE        the run's mods and cheats (native/core/mods.h)
+@@ -32,6 +35,7 @@
+ 
+ typedef struct NcOptions {
+     bool uncap, async_pipe, prebuild;
++    unsigned fps;               /* the FPS lock, 0: none */
+     int64_t video;              /* -1: the core's default */
+     int av_pack;                /* NC_AV_PACK_* */
+ } NcOptions;
+diff -ruN a/native/dev/dev.h b/native/dev/dev.h
+--- a/native/dev/dev.h	2026-11-07 00:01:34.261338576 +0000
++++ b/native/dev/dev.h	2026-11-07 00:01:28.313078749 +0000
+@@ -21,6 +21,8 @@
+ void nc_dev_nv2a_display_mode(uint32_t pitch, uint32_t xfmt, unsigned hz, uint32_t fb);
+ /* A mod's vblank: n times the video mode's rate (1-4; before the title boots). */
+ void nc_dev_nv2a_vblank_multiply(unsigned n);
++/* The app's FPS lock: the vblank at hz (15-240) whatever the video mode; 0: off. */
++void nc_dev_nv2a_lock_rate(unsigned hz);
+ /* A vsync of the panel the frames are shown on (host monotonic ns, the
+  * Choreographer's frame time): the vblank locks to the panel's. */
+ void nc_dev_nv2a_display_vsync(uint64_t ns);
+diff -ruN a/native/dev/nv2a.c b/native/dev/nv2a.c
+--- a/native/dev/nv2a.c	2026-11-07 00:01:34.261351710 +0000
++++ b/native/dev/nv2a.c	2026-11-07 00:01:28.313087431 +0000
+@@ -792,17 +792,37 @@
+  * times this; a frame-locked title paced by vblanks then runs that much
+  * faster unless the mod halves its steps. */
+ static unsigned g_mode_hz = 60, g_vblank_mul = 1;
++/* The app's FPS lock (options.h fps=): the vblank at exactly this rate,
++ * whatever the video mode and the mods say; 0: none. */
++static unsigned g_lock_hz;
++
++/* The video mode's frame period: what a savestate keeps, whatever rate the
++ * run has (a lock or a mod's). */
++static uint64_t mode_frame_ns(void)
++{
++    return g_mode_hz == 50 ? 20000000ull : FRAME_NS;
++}
+ 
+ void nc_dev_nv2a_refresh(unsigned hz)
+ {
+     g_mode_hz = hz == 50 ? 50 : 60;
+-    const uint64_t f = (hz == 50 ? 20000000ull : FRAME_NS) / g_vblank_mul;
++    const uint64_t f = g_lock_hz ? 1000000000ull / g_lock_hz : mode_frame_ns() / g_vblank_mul;
+     if (__atomic_exchange_n(&g_frame_ns, f, __ATOMIC_RELAXED) != f) {
+-        nc_log("hakuX-native", "nv2a: vblank at %u Hz (the video mode%s)", g_mode_hz * g_vblank_mul,
+-               g_vblank_mul > 1 ? ", a mod's rate" : "");
++        if (g_lock_hz) {
++            nc_log("hakuX-native", "nv2a: vblank at %u Hz (the FPS lock)", g_lock_hz);
++        } else {
++            nc_log("hakuX-native", "nv2a: vblank at %u Hz (the video mode%s)", g_mode_hz * g_vblank_mul,
++                   g_vblank_mul > 1 ? ", a mod's rate" : "");
++        }
+     }
+ }
+ 
++void nc_dev_nv2a_lock_rate(unsigned hz)
++{
++    g_lock_hz = hz >= 15 && hz <= 240 ? hz : 0;
++    nc_dev_nv2a_refresh(g_mode_hz);
++}
++
+ void nc_dev_nv2a_display_mode(uint32_t pitch, uint32_t xfmt, unsigned hz, uint32_t fb)
+ {
+     hle_pb_display_mode(pitch, xfmt, hz);
+@@ -958,7 +978,7 @@
+ 
+ bool nc_nv2a_state_save(NcBuf *b)
+ {
+-    const NcNv2aState st = {__atomic_load_n(&g_vblanks, __ATOMIC_RELAXED), g_frame_ns,
++    const NcNv2aState st = {__atomic_load_n(&g_vblanks, __ATOMIC_RELAXED), mode_frame_ns(),
+                             pages_put(NULL, g_regs, NV2A_SIZE, true)};
+     nc_rec_put(b, &nc_rec_NcNv2aState, &st);
+     pages_put(b, g_regs, NV2A_SIZE, false);
