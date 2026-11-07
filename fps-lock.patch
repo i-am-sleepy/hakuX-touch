@@ -1,6 +1,6 @@
 diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt b/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt
 --- a/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt	2026-11-07 00:01:34.251712954 +0000
-+++ b/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt	2026-11-07 00:01:28.300749549 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt	2026-11-07 06:06:59.123747000 +0000
 @@ -236,8 +236,11 @@
      }
      /* The app's settings, under this game's overrides. */
@@ -17,7 +17,7 @@ diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/NativeCoreActivity.kt
      /* The HLE GPU's render scale, 1-4x the title's resolution. */
 diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt b/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt
 --- a/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt	2026-11-07 00:01:34.251896953 +0000
-+++ b/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt	2026-11-07 00:01:28.300936637 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt	2026-11-07 06:06:59.124032537 +0000
 @@ -90,6 +90,11 @@
      get() = sp.getInt(NativeCoreActivity.PREF_SCALE, NativeCoreActivity.DEFAULT_SCALE)
      set(value) = sp.edit { putInt(NativeCoreActivity.PREF_SCALE, value) }
@@ -40,7 +40,7 @@ diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/data/AppPrefs.kt b/an
      private const val KEY_TURNIP_NOTE = "turnip_note_shown"
 diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt b/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt
 --- a/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt	2026-11-07 00:01:34.252000669 +0000
-+++ b/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt	2026-11-07 00:01:28.301015665 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt	2026-11-07 06:06:59.124198174 +0000
 @@ -10,6 +10,7 @@
  enum class GameSetting(val key: String) {
    UNCAPPED("uncapped"),
@@ -59,7 +59,7 @@ diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/data/GameSettings.kt 
    /** A debug build's setting (off for A/B); always on in the others. */
 diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.kt b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.kt
 --- a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.kt	1970-01-01 00:00:00.000000000 +0000
-+++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.kt	2026-11-07 00:01:28.302077475 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.kt	2026-11-07 06:06:59.126841130 +0000
 @@ -0,0 +1,12 @@
 +package com.rfandango.haku_x.ui.settings
 +
@@ -75,7 +75,7 @@ diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/FpsLock.k
 +  if (value == 0) stringResource(R.string.settings_fps_lock_off) else stringResource(R.string.settings_fps_lock_value, value)
 diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSettingsScreen.kt b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSettingsScreen.kt
 --- a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSettingsScreen.kt	2026-11-07 00:01:34.253041521 +0000
-+++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSettingsScreen.kt	2026-11-07 00:01:28.302034562 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSettingsScreen.kt	2026-11-07 06:06:59.126712816 +0000
 @@ -47,6 +47,7 @@
  private val SECTIONS: List<Pair<Int, List<Overridable>>> = listOf(
    R.string.settings_section_display to listOf(
@@ -86,7 +86,7 @@ diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/GameSetti
    R.string.settings_section_graphics to listOf(
 diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt
 --- a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt	2026-11-07 00:01:34.253080501 +0000
-+++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt	2026-11-07 00:01:28.302059916 +0000
++++ b/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsScreen.kt	2026-11-07 06:06:59.126795092 +0000
 @@ -87,6 +87,8 @@
    var showFps by remember { mutableStateOf(prefs.showFps) }
    var showHitches by remember { mutableStateOf(prefs.showHitches) }
@@ -131,13 +131,13 @@ diff -ruN a/android/app/src/main/java/com/rfandango/haku_x/ui/settings/SettingsS
        title = stringResource(R.string.settings_aspect),
 diff -ruN a/android/app/src/main/res/values/strings.xml b/android/app/src/main/res/values/strings.xml
 --- a/android/app/src/main/res/values/strings.xml	2026-11-07 00:01:34.254896124 +0000
-+++ b/android/app/src/main/res/values/strings.xml	2026-11-07 00:01:28.305082083 +0000
++++ b/android/app/src/main/res/values/strings.xml	2026-11-07 06:06:59.131100339 +0000
 @@ -177,6 +177,10 @@
    <string name="settings_export_logs_failed">Couldn\'t export the logs</string>
    <string name="settings_uncap">Uncapped frame rate</string>
    <string name="settings_uncap_desc">Present every frame at once instead of waiting for the display.</string>
 +  <string name="settings_fps_lock">FPS lock</string>
-+  <string name="settings_fps_lock_desc">Sets the console\'s refresh rate. A game that counts frames runs faster or slower with it, and it replaces the uncapped frame rate.</string>
++  <string name="settings_fps_lock_desc">Holds the game to this many frames a second: the console\'s refresh rate, and a limit on the frames it shows. A game that counts frames runs faster or slower with it. It replaces the uncapped frame rate.</string>
 +  <string name="settings_fps_lock_off">Off</string>
 +  <string name="settings_fps_lock_value">%1$d fps</string>
    <string name="settings_scale">Resolution scale</string>
@@ -145,7 +145,7 @@ diff -ruN a/android/app/src/main/res/values/strings.xml b/android/app/src/main/r
    <string name="settings_scale_native">1x (native)</string>
 diff -ruN a/native/core/options.c b/native/core/options.c
 --- a/native/core/options.c	2026-11-07 00:01:34.260331583 +0000
-+++ b/native/core/options.c	2026-11-07 00:01:28.311889107 +0000
++++ b/native/core/options.c	2026-11-07 06:06:59.145557510 +0000
 @@ -5,6 +5,7 @@
  #include "native/core/options.h"
  #include "native/core/core.h"
@@ -175,18 +175,19 @@ diff -ruN a/native/core/options.c b/native/core/options.c
          unsetenv("HAKUX_HLE_UNCAP");
 diff -ruN a/native/core/options.h b/native/core/options.h
 --- a/native/core/options.h	2026-11-07 00:01:34.260344178 +0000
-+++ b/native/core/options.h	2026-11-07 00:01:28.311901071 +0000
-@@ -4,6 +4,9 @@
++++ b/native/core/options.h	2026-11-07 06:06:59.145592324 +0000
+@@ -4,6 +4,10 @@
   *
   *   uncap            every frame presented at once, without waiting for
   *                    vblank (the HLE GPU's HAKUX_HLE_UNCAP)
 + *   fps=N            lock the console's vblank at N Hz (15-240), whatever its
-+ *                    video mode; frame-locked titles run at N/60 of their speed.
-+ *                    It replaces uncap
++ *                    video mode, and hold the flips to N a second (a title that
++ *                    swaps without waiting for a vblank too); frame-locked
++ *                    titles run at N/60 of their speed. It replaces uncap
   *   relaunch         a title's reboot into another of its XBEs
   *   loadstate=FILE   boot into a savestate (native/state)
   *   mods=FILE        the run's mods and cheats (native/core/mods.h)
-@@ -32,6 +35,7 @@
+@@ -32,6 +36,7 @@
  
  typedef struct NcOptions {
      bool uncap, async_pipe, prebuild;
@@ -196,7 +197,7 @@ diff -ruN a/native/core/options.h b/native/core/options.h
  } NcOptions;
 diff -ruN a/native/dev/dev.h b/native/dev/dev.h
 --- a/native/dev/dev.h	2026-11-07 00:01:34.261338576 +0000
-+++ b/native/dev/dev.h	2026-11-07 00:01:28.313078749 +0000
++++ b/native/dev/dev.h	2026-11-07 06:06:59.148831363 +0000
 @@ -21,6 +21,8 @@
  void nc_dev_nv2a_display_mode(uint32_t pitch, uint32_t xfmt, unsigned hz, uint32_t fb);
  /* A mod's vblank: n times the video mode's rate (1-4; before the title boots). */
@@ -208,8 +209,25 @@ diff -ruN a/native/dev/dev.h b/native/dev/dev.h
  void nc_dev_nv2a_display_vsync(uint64_t ns);
 diff -ruN a/native/dev/nv2a.c b/native/dev/nv2a.c
 --- a/native/dev/nv2a.c	2026-11-07 00:01:34.261351710 +0000
-+++ b/native/dev/nv2a.c	2026-11-07 00:01:28.313087431 +0000
-@@ -792,17 +792,37 @@
++++ b/native/dev/nv2a.c	2026-11-07 06:06:59.148868734 +0000
+@@ -131,6 +131,8 @@
+     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+ }
+ 
++static void flip_limit(void);   /* the FPS lock's, below */
++
+ static uint32_t *reg(uint32_t off)
+ {
+     return (uint32_t *)(g_regs + off);
+@@ -528,6 +530,7 @@
+         /* the vblank ISR's flip: the read counter advances (modulo), and a
+          * FLIP_STALL in the push buffer may go on */
+         if (value & 2) {
++            flip_limit();
+             uint32_t s = ld(NV_PGRAPH_SURFACE), n;
+             do {
+                 const uint32_t mod = (s >> 28) & 7, rd = (s >> 24) & 7;
+@@ -792,14 +795,58 @@
   * times this; a frame-locked title paced by vblanks then runs that much
   * faster unless the mod halves its steps. */
  static unsigned g_mode_hz = 60, g_vblank_mul = 1;
@@ -238,19 +256,40 @@ diff -ruN a/native/dev/nv2a.c b/native/dev/nv2a.c
 +            nc_log("hakuX-native", "nv2a: vblank at %u Hz (the video mode%s)", g_mode_hz * g_vblank_mul,
 +                   g_vblank_mul > 1 ? ", a mod's rate" : "");
 +        }
-     }
- }
- 
++    }
++}
++
 +void nc_dev_nv2a_lock_rate(unsigned hz)
 +{
 +    g_lock_hz = hz >= 15 && hz <= 240 ? hz : 0;
 +    nc_dev_nv2a_refresh(g_mode_hz);
 +}
 +
- void nc_dev_nv2a_display_mode(uint32_t pitch, uint32_t xfmt, unsigned hz, uint32_t fb)
- {
-     hle_pb_display_mode(pitch, xfmt, hz);
-@@ -958,7 +978,7 @@
++/* The FPS lock's second half: a title that flips when it pleases (immediate
++ * swaps, not on a vblank) isn't held by the vblank's rate, so a flip comes
++ * no sooner than one period after the one before it. The sleep is in the
++ * guest's write of the flip, like a frame limiter's in the swap call. */
++static void flip_limit(void)
++{
++    static uint64_t last;
++    const unsigned hz = g_lock_hz;
++    if (!hz) {
++        return;
++    }
++    const uint64_t period = 1000000000ull / hz;
++    const uint64_t t = now_ns();
++    const uint64_t due = last + period;
++    if (t < due) {
++        const struct timespec ts = {(time_t)(due / 1000000000ull), (long)(due % 1000000000ull)};
++        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) != 0) {
++        }
++        last = due;
++    } else {
++        last = t > due + period ? t : due;  /* well behind: start again from now */
+     }
+ }
+ 
+@@ -958,7 +1005,7 @@
  
  bool nc_nv2a_state_save(NcBuf *b)
  {
