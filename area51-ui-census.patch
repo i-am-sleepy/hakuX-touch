@@ -1,0 +1,208 @@
+diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
+--- a/hw/xbox/hle/pb/pbdraw.c	2026-11-08 19:01:00.148693168 +0000
++++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-09 02:31:14.640313723 +0000
+@@ -1290,6 +1290,10 @@
+     return isfinite(f) ? MIN(f * zfloat_scale(z24), 1.0f) : 1.0f;
+ }
+ 
++/* Area 51 frame census (debug, below): one frame in 300 of that title only */
++static void a51_flush(void);
++static bool a51_capturing(void);
++
+ static void clear(uint32_t flags)
+ {
+     sync_rt();
+@@ -1325,6 +1329,11 @@
+         c->nrects = 1;
+         c->rect[0] = r;
+     }
++    if (a51_capturing()) {
++        hle_log("hakuX-a51", "  clear %02x rt %u ds %u colour %08x mask %08x rect %d,%d-%d,%d of %ux%u",
++                c->flags, g_pd.rt, g_pd.ds, c->color, R(0x0358), r.x1, r.y1, r.x2, r.y2, g_pd.rt_w,
++                g_pd.rt_h);
++    }
+     if (g_dlog_left > 0) {
+         hle_log("hakuX-hle-pb", "clear %02x rt %u ds %u colour %08x z %g s %u rect %d,%d-%d,%d of %ux%u",
+                 c->flags, g_pd.rt, g_pd.ds, c->color, c->z, c->stencil, r.x1, r.y1, r.x2, r.y2,
+@@ -1403,6 +1412,7 @@
+  * on screen, black, for every frame. */
+ static void swap(void)
+ {
++    a51_flush();
+     sync_rt();
+     if (!g_pd.rt) {
+         return;
+@@ -2807,6 +2817,163 @@
+     g_phase = 0;
+ }
+ 
++/* ---- Area 51 (4D570005) frame census (debug) ----
++ * Its 2D (HUD, markers, menus) doesn't show. Nothing to switch on: for that
++ * title only, every A51_EVERY swaps (the first after A51_PHASE) the draws of
++ * one frame are counted by the state they were made with and logged as
++ * "hakuX-a51" lines at the frame's swap: one line a kind of draw (count, the
++ * draws' numbers in the frame, vertices, vertex format, target, textures,
++ * blend, depth, viewport), the clears, the draws the decoder skipped, and
++ * which target the swap shows.
++ * Settings -> Export logs carries them. */
++#define A51_TITLE 0x4D570005u
++#define A51_EVERY 300u
++#define A51_PHASE 120u
++#define A51_ROWS  256
++#define A51_CAPS  24
++
++typedef struct A51Row {
++    char key[640];
++    char v0[72], vn[72];                /* the first, the last draw's first vertex */
++    uint32_t n, first, last;            /* draws' numbers in the frame */
++    uint64_t verts;
++} A51Row;
++
++static A51Row g_a51_row[A51_ROWS];
++static unsigned g_a51_rows, g_a51_lost, g_a51_caps;
++static uint64_t g_a51_skips[SK_N];
++static uint64_t g_a51_draws;
++
++static bool a51_capturing(void)
++{
++    return g_hle.title.xbe.title_id == A51_TITLE && g_a51_caps < A51_CAPS &&
++           g_pd.swaps % A51_EVERY == A51_PHASE;
++}
++
++/* A target's description: id, size, pitch, format. */
++static void a51_obj(char *out, size_t n, uint32_t id)
++{
++    const PbObj *o = id ? obj_of(id) : NULL;
++    if (o) {
++        snprintf(out, n, "%u(%ux%u p%u x%x)", id, o->d.w, o->d.h, o->d.pitch, o->d.xfmt);
++    } else {
++        snprintf(out, n, "%u", id);
++    }
++}
++
++/* The first vertex of the draw being emitted (x y z w of attribute 0, as the
++ * vertices came: immediate, inline, or read in place from guest RAM). */
++static void a51_vertex(const HleCmdDraw *d, char *out, size_t n)
++{
++    float f[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
++    const char *src = "none";
++    if (g_pd.nimm) {
++        memcpy(f, g_pd.imm, sizeof(f));
++        src = "imm";
++    } else if (g_pd.ninl >= 4) {
++        memcpy(f, g_pd.inl, sizeof(f));
++        src = "inl";
++    } else if (d->nbind && (d->guest_vb & 1) && d->bind_off[0]) {
++        const uint8_t *p = hle_pa_ptr(d->bind_off[0] + ((d->attr[0] >> 16) & 0xFFFFu), 16);
++        if (p) {
++            memcpy(f, p, sizeof(f));
++            src = "gst";
++        }
++    }
++    snprintf(out, n, "%s %g %g %g %g", src, f[0], f[1], f[2], f[3]);
++}
++
++static void a51_census(const HleCmdDraw *d, bool ff)
++{
++    char k[640], rt[64], ds[64], vtx[72];
++    size_t o = 0;
++#define A51K(...) do { if (o < sizeof(k)) o += (size_t)snprintf(k + o, sizeof(k) - o, __VA_ARGS__); } while (0)
++    a51_obj(rt, sizeof(rt), g_pd.rt);
++    a51_obj(ds, sizeof(ds), g_pd.ds);
++    A51K("%s prim %u fvf %x imm %u nb %u str %u vsh %llx rt %s ds %s", ff ? "ff" : "prog", d->prim, d->fvf,
++         d->imm, d->nbind, d->nbind ? d->bind_stride[0] : d->stride, (unsigned long long)d->vsh, rt, ds);
++    for (unsigned s = 0; s < 4; s++) {
++        if (d->tex[s] || R(NV097_SET_TEXTURE_FORMAT + 64 * s)) {
++            A51K(" t%u=%s%s%s f%08x", s, d->tex[s] ? "set" : "none", (d->tex_unset >> s) & 1 ? "(unset)" : "",
++                 (d->tex_lin >> s) & 1 ? "(lin)" : "", R(NV097_SET_TEXTURE_FORMAT + 64 * s));
++        }
++    }
++    A51K(" | surf %08x clip %08x %08x ctl0 %08x", R(NV097_SET_SURFACE_FORMAT), R(NV097_SET_SURFACE_CLIP_HORIZONTAL),
++         R(NV097_SET_SURFACE_CLIP_VERTICAL), R(NV097_SET_CONTROL0));
++    A51K(" | at %x/%x/%x bl %x/%x/%x/%x z %x/%x/%x cm %08x cull %x/%x/%x st %x", R(0x0300), R(0x033C), R(0x0340),
++         R(0x0304), R(0x0344), R(0x0348), R(0x0350), R(0x030C), R(0x035C), R(0x0354), R(0x0358), R(0x0308),
++         R(0x039C), R(0x03A0), R(0x032C));
++    A51K(" | vp off %08x %08x %08x %08x sc %08x %08x %08x %08x wc %x", R(NV097_SET_VIEWPORT_OFFSET),
++         R(NV097_SET_VIEWPORT_OFFSET + 4), R(NV097_SET_VIEWPORT_OFFSET + 8), R(NV097_SET_VIEWPORT_OFFSET + 12),
++         R(NV097_SET_VIEWPORT_SCALE), R(NV097_SET_VIEWPORT_SCALE + 4), R(NV097_SET_VIEWPORT_SCALE + 8),
++         R(NV097_SET_VIEWPORT_SCALE + 12), R(NV097_SET_WINDOW_CLIP_TYPE));
++#undef A51K
++    const uint32_t seq = (uint32_t)g_a51_draws++;
++    a51_vertex(d, vtx, sizeof(vtx));
++    for (unsigned i = 0; i < g_a51_rows; i++) {
++        if (!strcmp(g_a51_row[i].key, k)) {
++            g_a51_row[i].n++;
++            g_a51_row[i].last = seq;
++            g_a51_row[i].verts += d->count;
++            memcpy(g_a51_row[i].vn, vtx, sizeof(vtx));
++            return;
++        }
++    }
++    if (g_a51_rows >= A51_ROWS) {
++        g_a51_lost++;
++        return;
++    }
++    snprintf(g_a51_row[g_a51_rows].key, sizeof(g_a51_row[0].key), "%s", k);
++    memcpy(g_a51_row[g_a51_rows].v0, vtx, sizeof(vtx));
++    memcpy(g_a51_row[g_a51_rows].vn, vtx, sizeof(vtx));
++    g_a51_row[g_a51_rows].n = 1;
++    g_a51_row[g_a51_rows].first = g_a51_row[g_a51_rows].last = seq;
++    g_a51_row[g_a51_rows].verts = d->count;
++    g_a51_rows++;
++}
++
++/* The swap: what the frame held, if it was a captured one; the skips counted
++ * either way, so a capture shows those of its own frame. */
++static void a51_flush(void)
++{
++    if (g_hle.title.xbe.title_id != A51_TITLE) {
++        return;
++    }
++    static bool armed;
++    if (!armed) {
++        armed = true;
++        hle_log("hakuX-a51", "frame census armed: one frame in %u from swap %u, up to %u of them", A51_EVERY,
++                A51_PHASE, A51_CAPS);
++    }
++    char sk[256] = "";
++    size_t o = 0;
++    for (unsigned i = 0; i < SK_N; i++) {
++        if (g_skips[i] != g_a51_skips[i] && o < sizeof(sk)) {
++            o += (size_t)snprintf(sk + o, sizeof(sk) - o, " %s=%llu", k_skip_name[i],
++                                  (unsigned long long)(g_skips[i] - g_a51_skips[i]));
++        }
++        g_a51_skips[i] = g_skips[i];
++    }
++    if (!g_a51_rows && !g_a51_draws) {
++        return;
++    }
++    char rt[64], fr[64];
++    a51_obj(rt, sizeof(rt), g_pd.rt);
++    a51_obj(fr, sizeof(fr), g_pd.frame_rt);
++    hle_log("hakuX-a51", "swap %llu: %llu draws in %u kinds (%u not listed), bound %s, frame target %s, display "
++            "%ux%u moded %d, skipped:%s",
++            (unsigned long long)g_pd.swaps + 1, (unsigned long long)g_a51_draws, g_a51_rows, g_a51_lost, rt, fr,
++            g_pd.disp_w, g_pd.disp_h, (int)g_disp_moded, sk[0] ? sk : " none");
++    for (unsigned i = 0; i < g_a51_rows; i++) {
++        hle_log("hakuX-a51", "  x%-4u #%u-%u v%-6llu [%s] [%s] %s", g_a51_row[i].n, g_a51_row[i].first,
++                g_a51_row[i].last, (unsigned long long)g_a51_row[i].verts, g_a51_row[i].v0, g_a51_row[i].vn,
++                g_a51_row[i].key);
++    }
++    g_a51_caps++;
++    g_a51_rows = g_a51_lost = 0;
++    g_a51_draws = 0;
++}
++
+ /* debug: a new value of debug.hakux.pbdraws=<n> logs the next n draws: the
+  * target, each stage's texture registers and object, the vertex source, the
+  * skinning mode and the first two attributes' formats (position, weights) */
+@@ -3203,6 +3370,9 @@
+                                                                            : 1.0f / 16777216.0f;
+     d->ff_ubo = HLE_DRAW_NO_UBO;
+     drawlog(d, ff);
++    if (a51_capturing()) {
++        a51_census(d, ff);
++    }
+     HleCmdDraw *c = begin(HLE_OP_DRAW, sizeof(*c));
+     *c = *d;
+     hle_fe_commit();
