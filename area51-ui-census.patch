@@ -1,25 +1,25 @@
 diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 --- a/hw/xbox/hle/pb/pbdraw.c	2026-11-08 19:01:00.148693168 +0000
-+++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-09 02:31:14.640313723 +0000
-@@ -1290,6 +1290,10 @@
++++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-09 02:59:56.868126742 +0000
+@@ -1290,6 +1290,11 @@
      return isfinite(f) ? MIN(f * zfloat_scale(z24), 1.0f) : 1.0f;
  }
  
 +/* Area 51 frame census (debug, below): one frame in 300 of that title only */
 +static void a51_flush(void);
 +static bool a51_capturing(void);
++static void a51_out(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
 +
  static void clear(uint32_t flags)
  {
      sync_rt();
-@@ -1325,6 +1329,11 @@
+@@ -1325,6 +1330,10 @@
          c->nrects = 1;
          c->rect[0] = r;
      }
 +    if (a51_capturing()) {
-+        hle_log("hakuX-a51", "  clear %02x rt %u ds %u colour %08x mask %08x rect %d,%d-%d,%d of %ux%u",
-+                c->flags, g_pd.rt, g_pd.ds, c->color, R(0x0358), r.x1, r.y1, r.x2, r.y2, g_pd.rt_w,
-+                g_pd.rt_h);
++        a51_out("  clear %02x rt %u ds %u colour %08x mask %08x rect %d,%d-%d,%d of %ux%u", c->flags, g_pd.rt,
++                g_pd.ds, c->color, R(0x0358), r.x1, r.y1, r.x2, r.y2, g_pd.rt_w, g_pd.rt_h);
 +    }
      if (g_dlog_left > 0) {
          hle_log("hakuX-hle-pb", "clear %02x rt %u ds %u colour %08x z %g s %u rect %d,%d-%d,%d of %ux%u",
@@ -32,7 +32,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      sync_rt();
      if (!g_pd.rt) {
          return;
-@@ -2807,6 +2817,163 @@
+@@ -2807,6 +2817,209 @@
      g_phase = 0;
  }
  
@@ -44,7 +44,9 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 + * draws' numbers in the frame, vertices, vertex format, target, textures,
 + * blend, depth, viewport), the clears, the draws the decoder skipped, and
 + * which target the swap shows.
-+ * Settings -> Export logs carries them. */
++ * They go to logcat (tag hakuX-a51) and to a51-census.txt in the app's log
++ * folder (<files>/logs/current), which Settings -> Export logs zips with the
++ * rest: logcat capture can stop early on a device, a file can't. */
 +#define A51_TITLE 0x4D570005u
 +#define A51_EVERY 300u
 +#define A51_PHASE 120u
@@ -62,6 +64,51 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +static unsigned g_a51_rows, g_a51_lost, g_a51_caps;
 +static uint64_t g_a51_skips[SK_N];
 +static uint64_t g_a51_draws;
++
++/* A line to logcat and to a51-census.txt beside the game's log. The folder
++ * is the app's <files>/logs/current: HAKUX_NATIVE_BASE is
++ * <files>/native/hdd/../hle (app_main.c), the files folder three components
++ * up from the hard disk's. Written through at once: a killed process leaves
++ * the file as it was. */
++static FILE *g_a51_fp;
++static bool g_a51_fp_tried;
++
++static void a51_out(const char *fmt, ...)
++{
++    char buf[1024];
++    va_list ap;
++    va_start(ap, fmt);
++    vsnprintf(buf, sizeof(buf), fmt, ap);
++    va_end(ap);
++    hle_log("hakuX-a51", "%s", buf);
++    if (!g_a51_fp_tried) {
++        g_a51_fp_tried = true;
++        const char *base = getenv("HAKUX_NATIVE_BASE");
++        char dir[512], path[600];
++        if (base && snprintf(dir, sizeof(dir), "%s", base) < (int)sizeof(dir)) {
++            const size_t n = strlen(dir), t = strlen("/../hle");
++            if (n > t && !strcmp(dir + n - t, "/../hle")) {
++                dir[n - t] = 0;                     /* <files>/native/hdd */
++            } else if (strrchr(dir, '/')) {
++                *strrchr(dir, '/') = 0;
++            }
++            for (unsigned i = 0; i < 2; i++) {      /* hdd, native */
++                char *sl = strrchr(dir, '/');
++                if (sl) {
++                    *sl = 0;
++                }
++            }
++            snprintf(path, sizeof(path), "%s/logs/current/a51-census.txt", dir);
++            g_a51_fp = fopen(path, "a");
++            hle_log("hakuX-a51", "census file %s: %s", path, g_a51_fp ? "open" : strerror(errno));
++        }
++    }
++    if (g_a51_fp) {
++        fputs(buf, g_a51_fp);
++        fputc('\n', g_a51_fp);
++        fflush(g_a51_fp);
++    }
++}
 +
 +static bool a51_capturing(void)
 +{
@@ -161,8 +208,8 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    static bool armed;
 +    if (!armed) {
 +        armed = true;
-+        hle_log("hakuX-a51", "frame census armed: one frame in %u from swap %u, up to %u of them", A51_EVERY,
-+                A51_PHASE, A51_CAPS);
++        a51_out("frame census armed (title %08x): one frame in %u from swap %u, up to %u of them",
++                g_hle.title.xbe.title_id, A51_EVERY, A51_PHASE, A51_CAPS);
 +    }
 +    char sk[256] = "";
 +    size_t o = 0;
@@ -179,14 +226,13 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    char rt[64], fr[64];
 +    a51_obj(rt, sizeof(rt), g_pd.rt);
 +    a51_obj(fr, sizeof(fr), g_pd.frame_rt);
-+    hle_log("hakuX-a51", "swap %llu: %llu draws in %u kinds (%u not listed), bound %s, frame target %s, display "
++    a51_out("swap %llu: %llu draws in %u kinds (%u not listed), bound %s, frame target %s, display "
 +            "%ux%u moded %d, skipped:%s",
 +            (unsigned long long)g_pd.swaps + 1, (unsigned long long)g_a51_draws, g_a51_rows, g_a51_lost, rt, fr,
 +            g_pd.disp_w, g_pd.disp_h, (int)g_disp_moded, sk[0] ? sk : " none");
 +    for (unsigned i = 0; i < g_a51_rows; i++) {
-+        hle_log("hakuX-a51", "  x%-4u #%u-%u v%-6llu [%s] [%s] %s", g_a51_row[i].n, g_a51_row[i].first,
-+                g_a51_row[i].last, (unsigned long long)g_a51_row[i].verts, g_a51_row[i].v0, g_a51_row[i].vn,
-+                g_a51_row[i].key);
++        a51_out("  x%-4u #%u-%u v%-6llu [%s] [%s] %s", g_a51_row[i].n, g_a51_row[i].first, g_a51_row[i].last,
++                (unsigned long long)g_a51_row[i].verts, g_a51_row[i].v0, g_a51_row[i].vn, g_a51_row[i].key);
 +    }
 +    g_a51_caps++;
 +    g_a51_rows = g_a51_lost = 0;
@@ -196,7 +242,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
  /* debug: a new value of debug.hakux.pbdraws=<n> logs the next n draws: the
   * target, each stage's texture registers and object, the vertex source, the
   * skinning mode and the first two attributes' formats (position, weights) */
-@@ -3203,6 +3370,9 @@
+@@ -3203,6 +3416,9 @@
                                                                             : 1.0f / 16777216.0f;
      d->ff_ubo = HLE_DRAW_NO_UBO;
      drawlog(d, ff);
