@@ -1,7 +1,139 @@
+diff -ruN a/hw/xbox/hle/hle.c b/hw/xbox/hle/hle.c
+--- a/hw/xbox/hle/hle.c	2026-11-09 22:43:16.511741312 +0000
++++ b/hw/xbox/hle/hle.c	2026-11-09 22:43:16.547915300 +0000
+@@ -10,6 +10,9 @@
+ #include "hw/xbox/hle/mem/barrier.h"
+ #include "hw/xbox/hle/mem/guestmem.h"
+ 
++#include <pthread.h>
++#include <time.h>
++
+ #ifdef __ANDROID__
+ #include <android/log.h>
+ #include <sys/system_properties.h>
+@@ -19,6 +22,100 @@
+ char g_hle_unavailable[256];
+ static HleTimer *g_diag_timer;
+ 
++/* The app's log folder, <files>/logs/current: Settings -> Export logs zips
++ * every file in it. HAKUX_NATIVE_BASE is <files>/native/hdd/../hle
++ * (native/app/app_main.c), the files folder three components up from the hard
++ * disk's. NULL where there is none. */
++const char *hle_app_logdir(void)
++{
++    static char dir[512];
++    static bool done;
++    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
++    pthread_mutex_lock(&mu);
++    if (!done) {
++        done = true;
++        const char *base = getenv("HAKUX_NATIVE_BASE");
++        char tmp[512];
++        if (base && snprintf(tmp, sizeof(tmp), "%s", base) < (int)sizeof(tmp)) {
++            const size_t n = strlen(tmp), t = strlen("/../hle");
++            if (n > t && !strcmp(tmp + n - t, "/../hle")) {
++                tmp[n - t] = 0;                     /* <files>/native/hdd */
++            } else if (strrchr(tmp, '/')) {
++                *strrchr(tmp, '/') = 0;
++            }
++            for (unsigned i = 0; i < 2; i++) {      /* hdd, native */
++                char *sl = strrchr(tmp, '/');
++                if (sl) {
++                    *sl = 0;
++                }
++            }
++            if (snprintf(dir, sizeof(dir), "%s/logs/current", tmp) >= (int)sizeof(dir)) {
++                dir[0] = 0;
++            }
++        }
++    }
++    pthread_mutex_unlock(&mu);
++    return dir[0] ? dir : NULL;
++}
++
++#define HLE_LOG_FILE_MAX (12u << 20)
++
++/* Every line also goes to hle.log in the app's log folder: logcat capture can
++ * stop early on a device and the export then lacks the lines that matter
++ * (a shader that failed to build, a draw dropped); a file can't. The same line
++ * again is counted, not written; a lock held (a line from a signal handler,
++ * say) drops the line rather than waits; the file stops at 12 MB. Area 51's
++ * census has a file of its own (pb/pbdraw.c). */
++static void hle_log_file(const char *tag, const char *msg)
++{
++    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
++    static FILE *fp;
++    static bool tried;
++    static size_t bytes;
++    static char last[1100];
++    static unsigned rep;
++    static struct timespec t0;
++    if (!strcmp(tag, "hakuX-a51") || pthread_mutex_trylock(&mu)) {
++        return;
++    }
++    if (!tried) {
++        tried = true;
++        const char *dir = hle_app_logdir();
++        if (dir) {
++            char path[600];
++            snprintf(path, sizeof(path), "%s/hle.log", dir);
++            fp = fopen(path, "a");
++        }
++        clock_gettime(CLOCK_MONOTONIC, &t0);
++    }
++    if (fp && bytes < HLE_LOG_FILE_MAX) {
++        char line[1100];
++        snprintf(line, sizeof(line), "%s: %s", tag, msg);
++        if (!strcmp(line, last)) {
++            rep++;
++        } else {
++            struct timespec t;
++            clock_gettime(CLOCK_MONOTONIC, &t);
++            int n = 0;
++            if (rep) {
++                n += fprintf(fp, "  (the last line again %u times)\n", rep);
++                rep = 0;
++            }
++            n += fprintf(fp, "%9.3f %s\n", (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9,
++                         line);
++            if (n > 0) {
++                bytes += (size_t)n;
++            }
++            snprintf(last, sizeof(last), "%s", line);
++            if (bytes >= HLE_LOG_FILE_MAX) {
++                fputs("(hle.log is full)\n", fp);
++            }
++            fflush(fp);
++        }
++    }
++    pthread_mutex_unlock(&mu);
++}
++
+ void hle_log(const char *tag, const char *fmt, ...)
+ {
+     char buf[1024];
+@@ -31,6 +128,7 @@
+ #else
+     fprintf(stderr, "%s: %s\n", tag, buf);
+ #endif
++    hle_log_file(tag, buf);
+ }
+ 
+ const char *hle_posture_name(HlePosture p)
 diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 --- a/hw/xbox/hle/pb/pbdraw.c	2026-11-08 19:01:00.148693168 +0000
-+++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-09 02:59:56.868126742 +0000
-@@ -1290,6 +1290,11 @@
++++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-09 17:41:20.145385148 +0000
+@@ -20,6 +20,9 @@
+ #include "hw/xbox/hle/tex/xg_swizzle.h"
+ #include "hw/xbox/hle/mem/barrier.h"
+ #include "hw/xbox/hle/prop.h"
++#include <dirent.h>
++#include <pthread.h>
++#include <sys/stat.h>
+ #include "hw/xbox/hle/front/arena.h"
+ #include "hw/xbox/hle/mem/guestmem.h"
+ #include "hw/xbox/hle/shader/ffhw.h"
+@@ -1290,6 +1293,12 @@
      return isfinite(f) ? MIN(f * zfloat_scale(z24), 1.0f) : 1.0f;
  }
  
@@ -9,11 +141,12 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +static void a51_flush(void);
 +static bool a51_capturing(void);
 +static void a51_out(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
++const char *hle_app_logdir(void);       /* hle.c: <files>/logs/current, or NULL */
 +
  static void clear(uint32_t flags)
  {
      sync_rt();
-@@ -1325,6 +1330,10 @@
+@@ -1325,6 +1334,10 @@
          c->nrects = 1;
          c->rect[0] = r;
      }
@@ -24,7 +157,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      if (g_dlog_left > 0) {
          hle_log("hakuX-hle-pb", "clear %02x rt %u ds %u colour %08x z %g s %u rect %d,%d-%d,%d of %ux%u",
                  c->flags, g_pd.rt, g_pd.ds, c->color, c->z, c->stencil, r.x1, r.y1, r.x2, r.y2,
-@@ -1403,6 +1412,7 @@
+@@ -1403,6 +1416,7 @@
   * on screen, black, for every frame. */
  static void swap(void)
  {
@@ -32,7 +165,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      sync_rt();
      if (!g_pd.rt) {
          return;
-@@ -2807,6 +2817,209 @@
+@@ -2807,6 +2821,398 @@
      g_phase = 0;
  }
  
@@ -41,21 +174,28 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 + * title only, every A51_EVERY swaps (the first after A51_PHASE) the draws of
 + * one frame are counted by the state they were made with and logged as
 + * "hakuX-a51" lines at the frame's swap: one line a kind of draw (count, the
-+ * draws' numbers in the frame, vertices, vertex format, target, textures,
-+ * blend, depth, viewport), the clears, the draws the decoder skipped, and
-+ * which target the swap shows.
-+ * They go to logcat (tag hakuX-a51) and to a51-census.txt in the app's log
-+ * folder (<files>/logs/current), which Settings -> Export logs zips with the
-+ * rest: logcat capture can stop early on a device, a file can't. */
++ * draws' numbers in the frame, vertices, the first and the last one's first
++ * vertex with its colour and texture coordinates, vertex format, target,
++ * textures, blend, depth, viewport), the clears, the draws the decoder
++ * skipped, and which target the swap shows.
++ * The title draws its text into small offscreen targets and samples them as
++ * textures; for a frame of that kind, and for a busy gameplay one, the census
++ * also asks the back end's rtdump (vk/back.c) for the frame's targets and the
++ * textures its 2D draws sampled, and copies those images over.
++ * Everything goes to logcat (tag hakuX-a51) and to a51-census.txt in the
++ * app's log folder (<files>/logs/current), which Settings -> Export logs zips
++ * with the rest: logcat capture can stop early on a device, a file can't. */
 +#define A51_TITLE 0x4D570005u
 +#define A51_EVERY 300u
 +#define A51_PHASE 120u
 +#define A51_ROWS  256
 +#define A51_CAPS  24
++#define A51_DUMPS 4                     /* rtdumps asked for, in all */
++#define A51_COPY_MAX (40u << 20)        /* bytes of images copied, in all */
 +
 +typedef struct A51Row {
-+    char key[640];
-+    char v0[72], vn[72];                /* the first, the last draw's first vertex */
++    char key[560];
++    char v0[168], vn[168];              /* the first, the last draw's first vertex */
 +    uint32_t n, first, last;            /* draws' numbers in the frame */
 +    uint64_t verts;
 +} A51Row;
@@ -65,11 +205,29 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +static uint64_t g_a51_skips[SK_N];
 +static uint64_t g_a51_draws;
 +
-+/* A line to logcat and to a51-census.txt beside the game's log. The folder
-+ * is the app's <files>/logs/current: HAKUX_NATIVE_BASE is
-+ * <files>/native/hdd/../hle (app_main.c), the files folder three components
-+ * up from the hard disk's. Written through at once: a killed process leaves
-+ * the file as it was. */
++/* the frame in progress: what the dump trigger looks at */
++static unsigned g_a51_f_draws, g_a51_f_small, g_a51_ntex;
++static uint32_t g_a51_tex[8];           /* textures its 2D draws on the frame's target sampled */
++static unsigned g_a51_nmenu, g_a51_ngame, g_a51_dumps;
++static uint64_t g_a51_last_req;
++
++/* a dump request for the back end's poll (rtd_poll, another thread) */
++static pthread_mutex_t g_a51_mu = PTHREAD_MUTEX_INITIALIZER;
++static int g_a51_rt_req;
++static char g_a51_rt_extra[96];
++
++/* the dumps' images, copied once they stop growing */
++static struct {
++    char name[112];
++    long size;
++    bool done;
++} g_a51_cp[64];
++static unsigned g_a51_ncp;
++static size_t g_a51_copied;
++
++/* A line to logcat and to a51-census.txt beside the game's log
++ * (hle_app_logdir: the app's <files>/logs/current). Written through at once:
++ * a killed process leaves the file as it was. */
 +static FILE *g_a51_fp;
 +static bool g_a51_fp_tried;
 +
@@ -83,22 +241,10 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    hle_log("hakuX-a51", "%s", buf);
 +    if (!g_a51_fp_tried) {
 +        g_a51_fp_tried = true;
-+        const char *base = getenv("HAKUX_NATIVE_BASE");
-+        char dir[512], path[600];
-+        if (base && snprintf(dir, sizeof(dir), "%s", base) < (int)sizeof(dir)) {
-+            const size_t n = strlen(dir), t = strlen("/../hle");
-+            if (n > t && !strcmp(dir + n - t, "/../hle")) {
-+                dir[n - t] = 0;                     /* <files>/native/hdd */
-+            } else if (strrchr(dir, '/')) {
-+                *strrchr(dir, '/') = 0;
-+            }
-+            for (unsigned i = 0; i < 2; i++) {      /* hdd, native */
-+                char *sl = strrchr(dir, '/');
-+                if (sl) {
-+                    *sl = 0;
-+                }
-+            }
-+            snprintf(path, sizeof(path), "%s/logs/current/a51-census.txt", dir);
++        const char *dir = hle_app_logdir();
++        char path[600];
++        if (dir) {
++            snprintf(path, sizeof(path), "%s/a51-census.txt", dir);
 +            g_a51_fp = fopen(path, "a");
 +            hle_log("hakuX-a51", "census file %s: %s", path, g_a51_fp ? "open" : strerror(errno));
 +        }
@@ -116,6 +262,21 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +           g_pd.swaps % A51_EVERY == A51_PHASE;
 +}
 +
++/* The back end's poll takes the dump asked for, once: the request's "+id,id"
++ * surfaces in extra. */
++bool hle_a51_take_rtdump(char *extra, size_t cap)
++{
++    bool r = false;
++    pthread_mutex_lock(&g_a51_mu);
++    if (g_a51_rt_req) {
++        g_a51_rt_req = 0;
++        snprintf(extra, cap, "%s", g_a51_rt_extra);
++        r = true;
++    }
++    pthread_mutex_unlock(&g_a51_mu);
++    return r;
++}
++
 +/* A target's description: id, size, pitch, format. */
 +static void a51_obj(char *out, size_t n, uint32_t id)
 +{
@@ -127,14 +288,17 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    }
 +}
 +
-+/* The first vertex of the draw being emitted (x y z w of attribute 0, as the
-+ * vertices came: immediate, inline, or read in place from guest RAM). */
++/* The first vertex of the draw being emitted, as the vertices came: immediate
++ * (position, then the colour and the first texture coordinates the draw set),
++ * inline, or read in place from guest RAM (position only). */
 +static void a51_vertex(const HleCmdDraw *d, char *out, size_t n)
 +{
-+    float f[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
++    float f[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, c[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, t[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 +    const char *src = "none";
 +    if (g_pd.nimm) {
 +        memcpy(f, g_pd.imm, sizeof(f));
++        memcpy(c, g_pd.imm + 3 * 4, sizeof(c));
++        memcpy(t, g_pd.imm + 9 * 4, sizeof(t));
 +        src = "imm";
 +    } else if (g_pd.ninl >= 4) {
 +        memcpy(f, g_pd.inl, sizeof(f));
@@ -146,12 +310,13 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +            src = "gst";
 +        }
 +    }
-+    snprintf(out, n, "%s %g %g %g %g", src, f[0], f[1], f[2], f[3]);
++    snprintf(out, n, "%s p %g %g %g %g c %g %g %g %g t %g %g", src, f[0], f[1], f[2], f[3], c[0], c[1], c[2], c[3],
++             t[0], t[1]);
 +}
 +
 +static void a51_census(const HleCmdDraw *d, bool ff)
 +{
-+    char k[640], rt[64], ds[64], vtx[72];
++    char k[560], rt[64], ds[64], vtx[168];
 +    size_t o = 0;
 +#define A51K(...) do { if (o < sizeof(k)) o += (size_t)snprintf(k + o, sizeof(k) - o, __VA_ARGS__); } while (0)
 +    a51_obj(rt, sizeof(rt), g_pd.rt);
@@ -160,7 +325,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +         d->imm, d->nbind, d->nbind ? d->bind_stride[0] : d->stride, (unsigned long long)d->vsh, rt, ds);
 +    for (unsigned s = 0; s < 4; s++) {
 +        if (d->tex[s] || R(NV097_SET_TEXTURE_FORMAT + 64 * s)) {
-+            A51K(" t%u=%s%s%s f%08x", s, d->tex[s] ? "set" : "none", (d->tex_unset >> s) & 1 ? "(unset)" : "",
++            A51K(" t%u=%u%s%s f%08x", s, d->tex[s], (d->tex_unset >> s) & 1 ? "(unset)" : "",
 +                 (d->tex_lin >> s) & 1 ? "(lin)" : "", R(NV097_SET_TEXTURE_FORMAT + 64 * s));
 +        }
 +    }
@@ -169,10 +334,8 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    A51K(" | at %x/%x/%x bl %x/%x/%x/%x z %x/%x/%x cm %08x cull %x/%x/%x st %x", R(0x0300), R(0x033C), R(0x0340),
 +         R(0x0304), R(0x0344), R(0x0348), R(0x0350), R(0x030C), R(0x035C), R(0x0354), R(0x0358), R(0x0308),
 +         R(0x039C), R(0x03A0), R(0x032C));
-+    A51K(" | vp off %08x %08x %08x %08x sc %08x %08x %08x %08x wc %x", R(NV097_SET_VIEWPORT_OFFSET),
-+         R(NV097_SET_VIEWPORT_OFFSET + 4), R(NV097_SET_VIEWPORT_OFFSET + 8), R(NV097_SET_VIEWPORT_OFFSET + 12),
-+         R(NV097_SET_VIEWPORT_SCALE), R(NV097_SET_VIEWPORT_SCALE + 4), R(NV097_SET_VIEWPORT_SCALE + 8),
-+         R(NV097_SET_VIEWPORT_SCALE + 12), R(NV097_SET_WINDOW_CLIP_TYPE));
++    A51K(" | vp off %08x %08x sc %08x %08x wc %x", R(NV097_SET_VIEWPORT_OFFSET), R(NV097_SET_VIEWPORT_OFFSET + 4),
++         R(NV097_SET_VIEWPORT_SCALE), R(NV097_SET_VIEWPORT_SCALE + 4), R(NV097_SET_WINDOW_CLIP_TYPE));
 +#undef A51K
 +    const uint32_t seq = (uint32_t)g_a51_draws++;
 +    a51_vertex(d, vtx, sizeof(vtx));
@@ -198,6 +361,160 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    g_a51_rows++;
 +}
 +
++/* Every draw of the title: the frame's counts the dump trigger reads. A draw
++ * into a small target is the title's text going into a texture; one onto the
++ * frame's target without depth that samples a texture is a 2D element, and
++ * the texture is one to dump. */
++static void a51_track(const HleCmdDraw *d)
++{
++    g_a51_f_draws++;
++    const PbObj *rt = g_pd.rt ? obj_of(g_pd.rt) : NULL;
++    if (rt && (uint64_t)rt->d.w * rt->d.h <= 512u * 128u) {
++        g_a51_f_small++;
++    } else if (g_pd.rt && g_pd.rt == g_pd.frame_rt && !g_pd.ds && d->tex[0] && !(d->tex_unset & 1u)) {
++        for (unsigned i = 0; i < g_a51_ntex; i++) {
++            if (g_a51_tex[i] == d->tex[0]) {
++                return;
++            }
++        }
++        if (g_a51_ntex < ARRAY_SIZE(g_a51_tex)) {
++            g_a51_tex[g_a51_ntex++] = d->tex[0];
++        }
++    }
++}
++
++/* The draw being emitted (emit()). */
++static void a51_emit(const HleCmdDraw *d, bool ff)
++{
++    if (g_hle.title.xbe.title_id != A51_TITLE) {
++        return;
++    }
++    a51_track(d);
++    if (a51_capturing()) {
++        a51_census(d, ff);
++    }
++}
++
++/* A copy of the back end's dump images (<base>/hle_shadow/rt_*) in the log
++ * folder: the first scan notes each file's size, a later one copies it if it
++ * stopped growing. */
++static bool a51_copy_file(const char *src, const char *dst)
++{
++    static char buf[65536];
++    FILE *in = fopen(src, "rb");
++    if (!in) {
++        return false;
++    }
++    FILE *out = fopen(dst, "wb");
++    if (!out) {
++        fclose(in);
++        return false;
++    }
++    bool ok = true;
++    size_t n;
++    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
++        if (fwrite(buf, 1, n, out) != n) {
++            ok = false;
++            break;
++        }
++    }
++    fclose(in);
++    fclose(out);
++    return ok;
++}
++
++static void a51_collect(void)
++{
++    const char *logdir = hle_app_logdir();
++    if (!logdir || g_a51_copied >= A51_COPY_MAX) {
++        return;
++    }
++    char dir[400];
++    snprintf(dir, sizeof(dir), "%shle_shadow", hle_host_base_path());
++    DIR *dp = opendir(dir);
++    if (!dp) {
++        return;
++    }
++    struct dirent *e;
++    while ((e = readdir(dp)) != NULL) {
++        if (strncmp(e->d_name, "rt_", 3) || strlen(e->d_name) >= sizeof(g_a51_cp[0].name)) {
++            continue;
++        }
++        unsigned i = 0;
++        while (i < g_a51_ncp && strcmp(g_a51_cp[i].name, e->d_name)) {
++            i++;
++        }
++        if (i == g_a51_ncp) {
++            if (g_a51_ncp >= ARRAY_SIZE(g_a51_cp)) {
++                continue;
++            }
++            snprintf(g_a51_cp[i].name, sizeof(g_a51_cp[i].name), "%s", e->d_name);
++            g_a51_cp[i].size = -1;
++            g_a51_cp[i].done = false;
++            g_a51_ncp++;
++        }
++        if (g_a51_cp[i].done) {
++            continue;
++        }
++        char src[560], dst[560];
++        snprintf(src, sizeof(src), "%s/%s", dir, e->d_name);
++        struct stat st;
++        if (stat(src, &st) || st.st_size <= 0) {
++            continue;
++        }
++        if (st.st_size != g_a51_cp[i].size) {
++            g_a51_cp[i].size = (long)st.st_size;       /* still growing, or new: look again later */
++            continue;
++        }
++        g_a51_cp[i].done = true;
++        if ((size_t)st.st_size > (6u << 20) || g_a51_copied + (size_t)st.st_size > A51_COPY_MAX) {
++            a51_out("dump image %s (%ld bytes) not copied: too large", e->d_name, (long)st.st_size);
++            continue;
++        }
++        snprintf(dst, sizeof(dst), "%s/%s", logdir, e->d_name);
++        const bool ok = a51_copy_file(src, dst);
++        g_a51_copied += ok ? (size_t)st.st_size : 0;
++        a51_out("dump image %s (%ld bytes) %s", e->d_name, (long)st.st_size, ok ? "copied" : "COPY FAILED");
++    }
++    closedir(dp);
++}
++
++/* The frame's end: asks for a dump of a frame like it, when it is one of the
++ * two kinds worth seeing, and not too soon after the last. */
++static void a51_decide(void)
++{
++    const uint64_t sw = g_pd.swaps + 1;
++    const bool menu = g_a51_f_small >= 3 && g_a51_f_draws <= 150 && g_a51_ntex > 0;
++    const bool game = g_a51_f_draws >= 800 && g_a51_ntex > 0;
++    if (sw <= 300 || (g_a51_last_req && sw - g_a51_last_req < 240) || g_a51_dumps >= A51_DUMPS) {
++        return;
++    }
++    const bool want_menu = menu && g_a51_nmenu < 2;
++    const bool want_game = !menu && game && g_a51_ngame < 2;
++    if (!want_menu && !want_game) {
++        return;
++    }
++    char extra[96];
++    size_t o = 0;
++    for (unsigned i = 0; i < g_a51_ntex && o + 12 < sizeof(extra); i++) {
++        o += (size_t)snprintf(extra + o, sizeof(extra) - o, "%c%u", i ? ',' : '+', g_a51_tex[i]);
++    }
++    pthread_mutex_lock(&g_a51_mu);
++    snprintf(g_a51_rt_extra, sizeof(g_a51_rt_extra), "%s", extra);
++    g_a51_rt_req = 1;
++    pthread_mutex_unlock(&g_a51_mu);
++    g_a51_last_req = sw;
++    g_a51_dumps++;
++    if (want_menu) {
++        g_a51_nmenu++;
++    } else {
++        g_a51_ngame++;
++    }
++    a51_out("rtdump asked for at swap %llu (%s frame: %u draws, %u into small targets), textures %s",
++            (unsigned long long)sw, want_menu ? "text-to-texture" : "gameplay", g_a51_f_draws, g_a51_f_small,
++            extra);
++}
++
 +/* The swap: what the frame held, if it was a captured one; the skips counted
 + * either way, so a capture shows those of its own frame. */
 +static void a51_flush(void)
@@ -210,6 +527,11 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +        armed = true;
 +        a51_out("frame census armed (title %08x): one frame in %u from swap %u, up to %u of them",
 +                g_hle.title.xbe.title_id, A51_EVERY, A51_PHASE, A51_CAPS);
++    }
++    a51_decide();
++    g_a51_f_draws = g_a51_f_small = g_a51_ntex = 0;
++    if (g_a51_last_req && ((g_pd.swaps + 1) & 7) == 0 && g_pd.swaps + 1 - g_a51_last_req < 600) {
++        a51_collect();
 +    }
 +    char sk[256] = "";
 +    size_t o = 0;
@@ -242,13 +564,36 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
  /* debug: a new value of debug.hakux.pbdraws=<n> logs the next n draws: the
   * target, each stage's texture registers and object, the vertex source, the
   * skinning mode and the first two attributes' formats (position, weights) */
-@@ -3203,6 +3416,9 @@
+@@ -3203,6 +3609,7 @@
                                                                             : 1.0f / 16777216.0f;
      d->ff_ubo = HLE_DRAW_NO_UBO;
      drawlog(d, ff);
-+    if (a51_capturing()) {
-+        a51_census(d, ff);
-+    }
++    a51_emit(d, ff);
      HleCmdDraw *c = begin(HLE_OP_DRAW, sizeof(*c));
      *c = *d;
      hle_fe_commit();
+diff -ruN a/hw/xbox/hle/vk/back.c b/hw/xbox/hle/vk/back.c
+--- a/hw/xbox/hle/vk/back.c	2026-11-09 22:43:16.513791792 +0000
++++ b/hw/xbox/hle/vk/back.c	2026-11-09 22:43:16.548535955 +0000
+@@ -983,6 +983,10 @@
+     }
+ }
+ 
++/* Area 51's frame census (pb/pbdraw.c) asks for a dump of a frame it picked,
++ * and the surfaces ("+id,id") the frame's 2D draws sampled */
++bool hle_a51_take_rtdump(char *extra, size_t cap);
++
+ static void rtd_poll(void)
+ {
+ #ifdef __ANDROID__
+@@ -996,6 +1000,10 @@
+         g_rtd.next = true;
+         rtd_extras(v);
+     }
++    if (hle_a51_take_rtdump(v, sizeof(v))) {
++        g_rtd.next = true;
++        rtd_extras(v);
++    }
+ #endif
+ }
+ 
