@@ -58,6 +58,29 @@ jobs:
           # backups a patch may leave would end up in the app's resources
           find android -type f \( -name "*.orig" -o -name "*.rej" \) -print -delete
 
+      # Gradle's download server answers 5xx now and then, and the wrapper
+      # doesn't retry: fetched here with retries, before the long core build
+      # (a failure then costs seconds, not hours), and kept for the next runs.
+      - name: Gradle wrapper cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Fetch Gradle (retried)
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          for i in 1 2 3 4 5 6 7 8; do
+            if ./gradlew -Dorg.gradle.java.home="$JAVA_HOME" --version --no-daemon; then
+              exit 0
+            fi
+            echo "::warning::Gradle download failed (try $i of 8), waiting"
+            sleep $((i * 20))
+          done
+          echo "::error::Gradle could not be downloaded after 8 tries"
+          exit 1
+
       - name: Install the Android SDK parts and the build tools
         run: |
           set -euo pipefail
