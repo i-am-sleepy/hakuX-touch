@@ -122,7 +122,7 @@ diff -ruN a/hw/xbox/hle/hle.c b/hw/xbox/hle/hle.c
  const char *hle_posture_name(HlePosture p)
 diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 --- a/hw/xbox/hle/pb/pbdraw.c	2026-11-08 19:01:00.148693168 +0000
-+++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-09 17:41:20.145385148 +0000
++++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-09 23:18:36.392879105 +0000
 @@ -20,6 +20,9 @@
  #include "hw/xbox/hle/tex/xg_swizzle.h"
  #include "hw/xbox/hle/mem/barrier.h"
@@ -165,7 +165,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      sync_rt();
      if (!g_pd.rt) {
          return;
-@@ -2807,6 +2821,398 @@
+@@ -2807,6 +2821,385 @@
      g_phase = 0;
  }
  
@@ -178,10 +178,10 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 + * vertex with its colour and texture coordinates, vertex format, target,
 + * textures, blend, depth, viewport), the clears, the draws the decoder
 + * skipped, and which target the swap shows.
-+ * The title draws its text into small offscreen targets and samples them as
-+ * textures; for a frame of that kind, and for a busy gameplay one, the census
-+ * also asks the back end's rtdump (vk/back.c) for the frame's targets and the
-+ * textures its 2D draws sampled, and copies those images over.
++ * At each captured frame the census also asks the back end's rtdump
++ * (vk/back.c) for the frame after it, and copies the image of the frame's
++ * target over (the other dump files are deleted): what the swap shows, in
++ * menus, cutscenes and gameplay, beside what was drawn.
 + * Everything goes to logcat (tag hakuX-a51) and to a51-census.txt in the
 + * app's log folder (<files>/logs/current), which Settings -> Export logs zips
 + * with the rest: logcat capture can stop early on a device, a file can't. */
@@ -190,7 +190,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +#define A51_PHASE 120u
 +#define A51_ROWS  256
 +#define A51_CAPS  24
-+#define A51_DUMPS 4                     /* rtdumps asked for, in all */
++#define A51_DUMPS 12                    /* rtdumps asked for, in all (one a capture frame) */
 +#define A51_COPY_MAX (40u << 20)        /* bytes of images copied, in all */
 +
 +typedef struct A51Row {
@@ -208,7 +208,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +/* the frame in progress: what the dump trigger looks at */
 +static unsigned g_a51_f_draws, g_a51_f_small, g_a51_ntex;
 +static uint32_t g_a51_tex[8];           /* textures its 2D draws on the frame's target sampled */
-+static unsigned g_a51_nmenu, g_a51_ngame, g_a51_dumps;
++static unsigned g_a51_dumps, g_a51_front;   /* dumps asked for; the frame target's id then */
 +static uint64_t g_a51_last_req;
 +
 +/* a dump request for the back end's poll (rtd_poll, another thread) */
@@ -221,7 +221,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    char name[112];
 +    long size;
 +    bool done;
-+} g_a51_cp[64];
++} g_a51_cp[192];
 +static unsigned g_a51_ncp;
 +static size_t g_a51_copied;
 +
@@ -426,7 +426,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +static void a51_collect(void)
 +{
 +    const char *logdir = hle_app_logdir();
-+    if (!logdir || g_a51_copied >= A51_COPY_MAX) {
++    if (!logdir) {
 +        return;
 +    }
 +    char dir[400];
@@ -434,6 +434,9 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    DIR *dp = opendir(dir);
 +    if (!dp) {
 +        return;
++    }
++    if (g_a51_ncp + 64 > ARRAY_SIZE(g_a51_cp)) {
++        g_a51_ncp = 0;                                  /* the files seen are gone by now */
 +    }
 +    struct dirent *e;
 +    while ((e = readdir(dp)) != NULL) {
@@ -467,52 +470,36 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +            continue;
 +        }
 +        g_a51_cp[i].done = true;
-+        if ((size_t)st.st_size > (6u << 20) || g_a51_copied + (size_t)st.st_size > A51_COPY_MAX) {
-+            a51_out("dump image %s (%ld bytes) not copied: too large", e->d_name, (long)st.st_size);
-+            continue;
++        /* rt_<swap>_<id>_...: the frame target's image; rt_<swap>_s<n>_...: a pass's, not wanted */
++        unsigned dsw = 0, did = 0;
++        if (sscanf(e->d_name, "rt_%u_%u_", &dsw, &did) == 2 && did == g_a51_front &&
++            (size_t)st.st_size <= (6u << 20) && g_a51_copied + (size_t)st.st_size <= A51_COPY_MAX) {
++            snprintf(dst, sizeof(dst), "%s/%s", logdir, e->d_name);
++            const bool ok = a51_copy_file(src, dst);
++            g_a51_copied += ok ? (size_t)st.st_size : 0;
++            a51_out("dump image %s (%ld bytes) %s", e->d_name, (long)st.st_size, ok ? "copied" : "COPY FAILED");
 +        }
-+        snprintf(dst, sizeof(dst), "%s/%s", logdir, e->d_name);
-+        const bool ok = a51_copy_file(src, dst);
-+        g_a51_copied += ok ? (size_t)st.st_size : 0;
-+        a51_out("dump image %s (%ld bytes) %s", e->d_name, (long)st.st_size, ok ? "copied" : "COPY FAILED");
++        remove(src);
 +    }
 +    closedir(dp);
 +}
 +
-+/* The frame's end: asks for a dump of a frame like it, when it is one of the
-+ * two kinds worth seeing, and not too soon after the last. */
++/* The frame's end: a captured frame asks for a dump of the next, and what its
++ * 2D draws sampled is noted. */
 +static void a51_decide(void)
 +{
-+    const uint64_t sw = g_pd.swaps + 1;
-+    const bool menu = g_a51_f_small >= 3 && g_a51_f_draws <= 150 && g_a51_ntex > 0;
-+    const bool game = g_a51_f_draws >= 800 && g_a51_ntex > 0;
-+    if (sw <= 300 || (g_a51_last_req && sw - g_a51_last_req < 240) || g_a51_dumps >= A51_DUMPS) {
++    if (g_pd.swaps % A51_EVERY != A51_PHASE || g_a51_dumps >= A51_DUMPS) {
 +        return;
-+    }
-+    const bool want_menu = menu && g_a51_nmenu < 2;
-+    const bool want_game = !menu && game && g_a51_ngame < 2;
-+    if (!want_menu && !want_game) {
-+        return;
-+    }
-+    char extra[96];
-+    size_t o = 0;
-+    for (unsigned i = 0; i < g_a51_ntex && o + 12 < sizeof(extra); i++) {
-+        o += (size_t)snprintf(extra + o, sizeof(extra) - o, "%c%u", i ? ',' : '+', g_a51_tex[i]);
 +    }
 +    pthread_mutex_lock(&g_a51_mu);
-+    snprintf(g_a51_rt_extra, sizeof(g_a51_rt_extra), "%s", extra);
++    g_a51_rt_extra[0] = 0;
 +    g_a51_rt_req = 1;
 +    pthread_mutex_unlock(&g_a51_mu);
-+    g_a51_last_req = sw;
++    g_a51_last_req = g_pd.swaps + 1;
++    g_a51_front = g_pd.frame_rt;
 +    g_a51_dumps++;
-+    if (want_menu) {
-+        g_a51_nmenu++;
-+    } else {
-+        g_a51_ngame++;
-+    }
-+    a51_out("rtdump asked for at swap %llu (%s frame: %u draws, %u into small targets), textures %s",
-+            (unsigned long long)sw, want_menu ? "text-to-texture" : "gameplay", g_a51_f_draws, g_a51_f_small,
-+            extra);
++    a51_out("rtdump asked for at swap %llu: %u draws, %u into small targets, %u textures sampled by 2D draws",
++            (unsigned long long)g_a51_last_req, g_a51_f_draws, g_a51_f_small, g_a51_ntex);
 +}
 +
 +/* The swap: what the frame held, if it was a captured one; the skips counted
@@ -530,7 +517,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    }
 +    a51_decide();
 +    g_a51_f_draws = g_a51_f_small = g_a51_ntex = 0;
-+    if (g_a51_last_req && ((g_pd.swaps + 1) & 7) == 0 && g_pd.swaps + 1 - g_a51_last_req < 600) {
++    if (g_a51_last_req && ((g_pd.swaps + 1) & 7) == 0 && g_pd.swaps + 1 - g_a51_last_req < 150) {
 +        a51_collect();
 +    }
 +    char sk[256] = "";
@@ -564,7 +551,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
  /* debug: a new value of debug.hakux.pbdraws=<n> logs the next n draws: the
   * target, each stage's texture registers and object, the vertex source, the
   * skinning mode and the first two attributes' formats (position, weights) */
-@@ -3203,6 +3609,7 @@
+@@ -3203,6 +3596,7 @@
                                                                             : 1.0f / 16777216.0f;
      d->ff_ubo = HLE_DRAW_NO_UBO;
      drawlog(d, ff);
