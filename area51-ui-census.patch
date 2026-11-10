@@ -122,7 +122,7 @@ diff -ruN a/hw/xbox/hle/hle.c b/hw/xbox/hle/hle.c
  const char *hle_posture_name(HlePosture p)
 diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 --- a/hw/xbox/hle/pb/pbdraw.c	2026-11-08 19:01:00.148693168 +0000
-+++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-10 04:07:39.149466179 +0000
++++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-10 04:32:21.459317620 +0000
 @@ -20,6 +20,9 @@
  #include "hw/xbox/hle/tex/xg_swizzle.h"
  #include "hw/xbox/hle/mem/barrier.h"
@@ -165,7 +165,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      sync_rt();
      if (!g_pd.rt) {
          return;
-@@ -2807,6 +2821,385 @@
+@@ -2807,6 +2821,340 @@
      g_phase = 0;
  }
  
@@ -179,9 +179,10 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 + * textures, blend, depth, viewport), the clears, the draws the decoder
 + * skipped, and which target the swap shows.
 + * At each captured frame the census also asks the back end's rtdump
-+ * (vk/back.c) for the frame after it, and copies the image of the frame's
-+ * target over (the other dump files are deleted): what the swap shows, in
-+ * menus, cutscenes and gameplay, beside what was drawn.
++ * (vk/back.c) for the frame after it, which hands over the images of the
++ * flip chain's buffers (hle_a51_keep_dump) to be saved in the log folder
++ * (the other dump files are deleted): what the swap shows, in menus,
++ * cutscenes and gameplay, beside what was drawn.
 + * Everything goes to logcat (tag hakuX-a51) and to a51-census.txt in the
 + * app's log folder (<files>/logs/current), which Settings -> Export logs zips
 + * with the rest: logcat capture can stop early on a device, a file can't. */
@@ -216,14 +217,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +static int g_a51_rt_req;
 +static char g_a51_rt_extra[96];
 +
-+/* the dumps' images, copied once they stop growing */
-+static struct {
-+    char name[112];
-+    long size;
-+    bool done;
-+} g_a51_cp[192];
-+static unsigned g_a51_ncp;
-+static size_t g_a51_copied;
++static unsigned g_a51_clean_at;       /* swap of the last clean-up of the dump folder */
 +
 +/* A line to logcat and to a51-census.txt beside the game's log
 + * (hle_app_logdir: the app's <files>/logs/current). Written through at once:
@@ -395,94 +389,54 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    }
 +}
 +
-+/* A copy of the back end's dump images (<base>/hle_shadow/rt_*) in the log
-+ * folder: the first scan notes each file's size, a later one copies it if it
-+ * stopped growing. */
-+static bool a51_copy_file(const char *src, const char *dst)
++/* The back end hands over each target image it dumps (vk/back.c, rtd_write)
++ * as it writes it: a whole frame of a flip-chain buffer (id 1 to 3) is saved in
++ * the log folder, up to A51_COPY_MAX bytes. Runs on the back end's thread. */
++void hle_a51_keep_dump(uint64_t swap, uint32_t id, unsigned w, unsigned h, unsigned bytes, const void *px)
 +{
-+    static char buf[65536];
-+    FILE *in = fopen(src, "rb");
-+    if (!in) {
-+        return false;
-+    }
-+    FILE *out = fopen(dst, "wb");
-+    if (!out) {
-+        fclose(in);
-+        return false;
-+    }
-+    bool ok = true;
-+    size_t n;
-+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-+        if (fwrite(buf, 1, n, out) != n) {
-+            ok = false;
-+            break;
-+        }
-+    }
-+    fclose(in);
-+    fclose(out);
-+    return ok;
-+}
-+
-+static void a51_collect(void)
-+{
-+    const char *logdir = hle_app_logdir();
-+    if (!logdir) {
++    static size_t total;
++    const char *dir = hle_app_logdir();
++    const size_t n = (size_t)w * h * bytes;
++    if (g_hle.title.xbe.title_id != A51_TITLE || !dir || !px || id < 1 || id > 3 || w != 640 || h != 480 ||
++        bytes != 4 || total + n > A51_COPY_MAX) {
 +        return;
 +    }
++    char path[600];
++    snprintf(path, sizeof(path), "%s/rt_%llu_%u_%ux%u_f44_b4.raw", dir, (unsigned long long)swap, id, w, h);
++    FILE *f = fopen(path, "wb");
++    if (!f) {
++        hle_log("hakuX-hle-back", "a51 dump %s: cannot open: %s", path, strerror(errno));
++        return;
++    }
++    const size_t wrote = fwrite(px, 1, n, f);
++    fclose(f);
++    total += wrote;
++    hle_log("hakuX-hle-back", "a51 dump image %s kept (%zu bytes)", path, wrote);
++}
++
++/* The dump files the back end leaves in <base>/hle_shadow are of no use to the
++ * app: deleted some frames after a request, so they don't fill the phone. */
++static void a51_clean(void)
++{
 +    char dir[400];
 +    snprintf(dir, sizeof(dir), "%shle_shadow", hle_host_base_path());
 +    DIR *dp = opendir(dir);
 +    if (!dp) {
 +        return;
 +    }
-+    if (g_a51_ncp + 64 > ARRAY_SIZE(g_a51_cp)) {
-+        g_a51_ncp = 0;                                  /* the files seen are gone by now */
-+    }
 +    struct dirent *e;
++    unsigned n = 0;
 +    while ((e = readdir(dp)) != NULL) {
-+        if (strncmp(e->d_name, "rt_", 3) || strlen(e->d_name) >= sizeof(g_a51_cp[0].name)) {
-+            continue;
++        if (!strncmp(e->d_name, "rt_", 3) && strlen(e->d_name) < 200) {
++            char path[640];
++            snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
++            n += remove(path) == 0;
 +        }
-+        unsigned i = 0;
-+        while (i < g_a51_ncp && strcmp(g_a51_cp[i].name, e->d_name)) {
-+            i++;
-+        }
-+        if (i == g_a51_ncp) {
-+            if (g_a51_ncp >= ARRAY_SIZE(g_a51_cp)) {
-+                continue;
-+            }
-+            snprintf(g_a51_cp[i].name, sizeof(g_a51_cp[i].name), "%s", e->d_name);
-+            g_a51_cp[i].size = -1;
-+            g_a51_cp[i].done = false;
-+            g_a51_ncp++;
-+        }
-+        if (g_a51_cp[i].done) {
-+            continue;
-+        }
-+        char src[560], dst[560];
-+        snprintf(src, sizeof(src), "%s/%s", dir, e->d_name);
-+        struct stat st;
-+        if (stat(src, &st) || st.st_size <= 0) {
-+            continue;
-+        }
-+        if (st.st_size != g_a51_cp[i].size) {
-+            g_a51_cp[i].size = (long)st.st_size;       /* still growing, or new: look again later */
-+            continue;
-+        }
-+        g_a51_cp[i].done = true;
-+        /* rt_<swap>_<id>_<w>x<h>_...: a target's final image, kept if it is a whole frame, whichever of
-+         * the flip chain's buffers it is; rt_<swap>_s<n>_...: a pass's, not wanted */
-+        unsigned dsw = 0, did = 0, dw = 0, dh = 0;
-+        if (sscanf(e->d_name, "rt_%u_%u_%ux%u_", &dsw, &did, &dw, &dh) == 4 && did <= 3 && dw == 640 && dh == 480 &&
-+            (size_t)st.st_size <= (6u << 20) && g_a51_copied + (size_t)st.st_size <= A51_COPY_MAX) {
-+            snprintf(dst, sizeof(dst), "%s/%s", logdir, e->d_name);
-+            const bool ok = a51_copy_file(src, dst);
-+            g_a51_copied += ok ? (size_t)st.st_size : 0;
-+            a51_out("dump image %s (%ld bytes) %s", e->d_name, (long)st.st_size, ok ? "copied" : "COPY FAILED");
-+        }
-+        remove(src);
 +    }
 +    closedir(dp);
++    if (n) {
++        a51_out("dump folder cleaned: %u files deleted", n);
++    }
 +}
 +
 +/* The frame's end: a captured frame asks for a dump of the next, and what its
@@ -517,8 +471,9 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    }
 +    a51_decide();
 +    g_a51_f_draws = g_a51_f_small = g_a51_ntex = 0;
-+    if (g_a51_last_req && ((g_pd.swaps + 1) & 7) == 0 && g_pd.swaps + 1 - g_a51_last_req < 150) {
-+        a51_collect();
++    if (g_a51_last_req && g_a51_clean_at < g_a51_last_req && g_pd.swaps + 1 - g_a51_last_req >= 90) {
++        g_a51_clean_at = g_pd.swaps + 1;
++        a51_clean();
 +    }
 +    char sk[256] = "";
 +    size_t o = 0;
@@ -551,7 +506,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
  /* debug: a new value of debug.hakux.pbdraws=<n> logs the next n draws: the
   * target, each stage's texture registers and object, the vertex source, the
   * skinning mode and the first two attributes' formats (position, weights) */
-@@ -3203,6 +3596,7 @@
+@@ -3203,6 +3551,7 @@
                                                                             : 1.0f / 16777216.0f;
      d->ff_ubo = HLE_DRAW_NO_UBO;
      drawlog(d, ff);
@@ -561,7 +516,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      hle_fe_commit();
 diff -ruN a/hw/xbox/hle/vk/back.c b/hw/xbox/hle/vk/back.c
 --- a/hw/xbox/hle/vk/back.c	2026-11-09 22:43:16.513791792 +0000
-+++ b/hw/xbox/hle/vk/back.c	2026-11-09 22:43:16.548535955 +0000
++++ b/hw/xbox/hle/vk/back.c	2026-11-10 04:32:21.461351160 +0000
 @@ -983,6 +983,10 @@
      }
  }
@@ -584,3 +539,21 @@ diff -ruN a/hw/xbox/hle/vk/back.c b/hw/xbox/hle/vk/back.c
  #endif
  }
  
+@@ -1057,6 +1065,9 @@
+     return true;
+ }
+ 
++/* Area 51's frame census (pb/pbdraw.c) keeps the frame images of a dump it asked for */
++void hle_a51_keep_dump(uint64_t swap, uint32_t id, unsigned w, unsigned h, unsigned bytes, const void *px);
++
+ static void rtd_write(uint64_t value)
+ {
+     hle_tl_wait(value);
+@@ -1090,6 +1101,7 @@
+                                                  e->w, e->h, e->fmt, e->bytes);
+             g_file_set_contents(p, (const char *)map + e->off,
+                                 (gssize)e->w * e->h * e->bytes, NULL);
++            hle_a51_keep_dump(g_back.st.swaps, e->id, e->w, e->h, e->bytes, map + e->off);
+         }
+         T.vkUnmapMemory(g_hvk.dev, g_rtd.mem);
+         hle_log("hakuX-hle-back", "rtdump: %u targets of swap %llu in %s", g_rtd.ne,
