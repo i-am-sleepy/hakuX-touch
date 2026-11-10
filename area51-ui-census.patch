@@ -122,7 +122,7 @@ diff -ruN a/hw/xbox/hle/hle.c b/hw/xbox/hle/hle.c
  const char *hle_posture_name(HlePosture p)
 diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 --- a/hw/xbox/hle/pb/pbdraw.c	2026-11-08 19:01:00.148693168 +0000
-+++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-09 23:18:36.392879105 +0000
++++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-10 04:07:39.149466179 +0000
 @@ -20,6 +20,9 @@
  #include "hw/xbox/hle/tex/xg_swizzle.h"
  #include "hw/xbox/hle/mem/barrier.h"
@@ -208,7 +208,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +/* the frame in progress: what the dump trigger looks at */
 +static unsigned g_a51_f_draws, g_a51_f_small, g_a51_ntex;
 +static uint32_t g_a51_tex[8];           /* textures its 2D draws on the frame's target sampled */
-+static unsigned g_a51_dumps, g_a51_front;   /* dumps asked for; the frame target's id then */
++static unsigned g_a51_dumps;                /* rtdumps asked for */
 +static uint64_t g_a51_last_req;
 +
 +/* a dump request for the back end's poll (rtd_poll, another thread) */
@@ -470,9 +470,10 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +            continue;
 +        }
 +        g_a51_cp[i].done = true;
-+        /* rt_<swap>_<id>_...: the frame target's image; rt_<swap>_s<n>_...: a pass's, not wanted */
-+        unsigned dsw = 0, did = 0;
-+        if (sscanf(e->d_name, "rt_%u_%u_", &dsw, &did) == 2 && did == g_a51_front &&
++        /* rt_<swap>_<id>_<w>x<h>_...: a target's final image, kept if it is a whole frame, whichever of
++         * the flip chain's buffers it is; rt_<swap>_s<n>_...: a pass's, not wanted */
++        unsigned dsw = 0, did = 0, dw = 0, dh = 0;
++        if (sscanf(e->d_name, "rt_%u_%u_%ux%u_", &dsw, &did, &dw, &dh) == 4 && did <= 3 && dw == 640 && dh == 480 &&
 +            (size_t)st.st_size <= (6u << 20) && g_a51_copied + (size_t)st.st_size <= A51_COPY_MAX) {
 +            snprintf(dst, sizeof(dst), "%s/%s", logdir, e->d_name);
 +            const bool ok = a51_copy_file(src, dst);
@@ -496,7 +497,6 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    g_a51_rt_req = 1;
 +    pthread_mutex_unlock(&g_a51_mu);
 +    g_a51_last_req = g_pd.swaps + 1;
-+    g_a51_front = g_pd.frame_rt;
 +    g_a51_dumps++;
 +    a51_out("rtdump asked for at swap %llu: %u draws, %u into small targets, %u textures sampled by 2D draws",
 +            (unsigned long long)g_a51_last_req, g_a51_f_draws, g_a51_f_small, g_a51_ntex);
