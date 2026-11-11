@@ -122,18 +122,19 @@ diff -ruN a/hw/xbox/hle/hle.c b/hw/xbox/hle/hle.c
  const char *hle_posture_name(HlePosture p)
 diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 --- a/hw/xbox/hle/pb/pbdraw.c	2026-11-08 19:01:00.148693168 +0000
-+++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-10 04:32:21.459317620 +0000
-@@ -20,6 +20,9 @@
++++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-10 19:39:11.074043686 +0000
+@@ -20,6 +20,10 @@
  #include "hw/xbox/hle/tex/xg_swizzle.h"
  #include "hw/xbox/hle/mem/barrier.h"
  #include "hw/xbox/hle/prop.h"
++#include "hw/xbox/hle/vk/back.h"
 +#include <dirent.h>
 +#include <pthread.h>
 +#include <sys/stat.h>
  #include "hw/xbox/hle/front/arena.h"
  #include "hw/xbox/hle/mem/guestmem.h"
  #include "hw/xbox/hle/shader/ffhw.h"
-@@ -1290,6 +1293,12 @@
+@@ -1290,6 +1294,12 @@
      return isfinite(f) ? MIN(f * zfloat_scale(z24), 1.0f) : 1.0f;
  }
  
@@ -146,7 +147,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
  static void clear(uint32_t flags)
  {
      sync_rt();
-@@ -1325,6 +1334,10 @@
+@@ -1325,6 +1335,10 @@
          c->nrects = 1;
          c->rect[0] = r;
      }
@@ -157,7 +158,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      if (g_dlog_left > 0) {
          hle_log("hakuX-hle-pb", "clear %02x rt %u ds %u colour %08x z %g s %u rect %d,%d-%d,%d of %ux%u",
                  c->flags, g_pd.rt, g_pd.ds, c->color, c->z, c->stencil, r.x1, r.y1, r.x2, r.y2,
-@@ -1403,6 +1416,7 @@
+@@ -1403,6 +1417,7 @@
   * on screen, black, for every frame. */
  static void swap(void)
  {
@@ -165,7 +166,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      sync_rt();
      if (!g_pd.rt) {
          return;
-@@ -2807,6 +2821,340 @@
+@@ -2807,6 +2822,386 @@
      g_phase = 0;
  }
  
@@ -256,8 +257,45 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +           g_pd.swaps % A51_EVERY == A51_PHASE;
 +}
 +
++/* The picture the screen shows (the back end's frame hook: after the blit, the
++ * gamma ramp and the overlay), of the frame a dump lands on, saved beside the
++ * dump's images: the one the back buffer's HUD can be compared with. Both run
++ * on the render thread. */
++static uint64_t g_a51_hook_n;
++static size_t g_a51_disp_total;
++
++static bool a51_frame_want(uint64_t n, void *opaque)
++{
++    return n && n == __atomic_load_n(&g_a51_hook_n, __ATOMIC_RELAXED);
++}
++
++static void a51_frame_got(uint64_t n, const uint8_t *rgba, uint32_t w, uint32_t h, void *opaque)
++{
++    const char *dir = hle_app_logdir();
++    const size_t sz = (size_t)w * h * 4;
++    if (!rgba || !dir) {
++        hle_log("hakuX-hle-back", "a51 display picture of swap %llu: none", (unsigned long long)n);
++        return;
++    }
++    if (g_a51_disp_total + sz > A51_COPY_MAX) {
++        return;
++    }
++    char path[600];
++    snprintf(path, sizeof(path), "%s/disp_%llu_%ux%u_rgba.raw", dir, (unsigned long long)n, w, h);
++    FILE *f = fopen(path, "wb");
++    if (!f) {
++        hle_log("hakuX-hle-back", "a51 display picture %s: cannot open: %s", path, strerror(errno));
++        return;
++    }
++    const size_t wrote = fwrite(rgba, 1, sz, f);
++    fclose(f);
++    g_a51_disp_total += wrote;
++    hle_log("hakuX-hle-back", "a51 display picture %s kept (%zu bytes)", path, wrote);
++}
++
 +/* The back end's poll takes the dump asked for, once: the request's "+id,id"
-+ * surfaces in extra. */
++ * surfaces in extra. The dump is of the frame after this swap, whose picture
++ * is asked for too. */
 +bool hle_a51_take_rtdump(char *extra, size_t cap)
 +{
 +    bool r = false;
@@ -268,6 +306,15 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +        r = true;
 +    }
 +    pthread_mutex_unlock(&g_a51_mu);
++    if (r) {
++        static bool hooked;
++        if (!hooked) {
++            static const HleFrameHook hook = { a51_frame_want, a51_frame_got, NULL };
++            hooked = true;
++            hle_back_set_frame_hook(&hook);
++        }
++        __atomic_store_n(&g_a51_hook_n, hle_back_swap_count() + 2, __ATOMIC_RELAXED);
++    }
 +    return r;
 +}
 +
@@ -506,7 +553,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
  /* debug: a new value of debug.hakux.pbdraws=<n> logs the next n draws: the
   * target, each stage's texture registers and object, the vertex source, the
   * skinning mode and the first two attributes' formats (position, weights) */
-@@ -3203,6 +3551,7 @@
+@@ -3203,6 +3598,7 @@
                                                                             : 1.0f / 16777216.0f;
      d->ff_ubo = HLE_DRAW_NO_UBO;
      drawlog(d, ff);
