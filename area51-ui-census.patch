@@ -122,7 +122,7 @@ diff -ruN a/hw/xbox/hle/hle.c b/hw/xbox/hle/hle.c
  const char *hle_posture_name(HlePosture p)
 diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 --- a/hw/xbox/hle/pb/pbdraw.c	2026-11-08 19:01:00.148693168 +0000
-+++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-10 19:39:11.074043686 +0000
++++ b/hw/xbox/hle/pb/pbdraw.c	2026-11-11 05:51:29.111027348 +0000
 @@ -20,6 +20,10 @@
  #include "hw/xbox/hle/tex/xg_swizzle.h"
  #include "hw/xbox/hle/mem/barrier.h"
@@ -134,7 +134,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
  #include "hw/xbox/hle/front/arena.h"
  #include "hw/xbox/hle/mem/guestmem.h"
  #include "hw/xbox/hle/shader/ffhw.h"
-@@ -1290,6 +1294,12 @@
+@@ -1290,6 +1294,14 @@
      return isfinite(f) ? MIN(f * zfloat_scale(z24), 1.0f) : 1.0f;
  }
  
@@ -143,14 +143,17 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +static bool a51_capturing(void);
 +static void a51_out(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
 +const char *hle_app_logdir(void);       /* hle.c: <files>/logs/current, or NULL */
++static void a51_note_cover(void);
++static uint32_t a51_present_choice(uint32_t bound);
 +
  static void clear(uint32_t flags)
  {
      sync_rt();
-@@ -1325,6 +1335,10 @@
+@@ -1325,6 +1337,11 @@
          c->nrects = 1;
          c->rect[0] = r;
      }
++    a51_note_cover();
 +    if (a51_capturing()) {
 +        a51_out("  clear %02x rt %u ds %u colour %08x mask %08x rect %d,%d-%d,%d of %ux%u", c->flags, g_pd.rt,
 +                g_pd.ds, c->color, R(0x0358), r.x1, r.y1, r.x2, r.y2, g_pd.rt_w, g_pd.rt_h);
@@ -158,7 +161,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      if (g_dlog_left > 0) {
          hle_log("hakuX-hle-pb", "clear %02x rt %u ds %u colour %08x z %g s %u rect %d,%d-%d,%d of %ux%u",
                  c->flags, g_pd.rt, g_pd.ds, c->color, c->z, c->stencil, r.x1, r.y1, r.x2, r.y2,
-@@ -1403,6 +1417,7 @@
+@@ -1403,6 +1420,7 @@
   * on screen, black, for every frame. */
  static void swap(void)
  {
@@ -166,7 +169,20 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
      sync_rt();
      if (!g_pd.rt) {
          return;
-@@ -2807,6 +2822,386 @@
+@@ -1422,6 +1440,12 @@
+             ay = g_pd.frame_aa_y;
+         }
+     }
++    const uint32_t a51_id = a51_present_choice(id);
++    if (a51_id != id) {
++        id = a51_id;
++        fo = obj_of(id);
++        ax = ay = 1;
++    }
+     coh_shown(fo);                          /* the front buffer's path keeps its memory */
+     /* memory the CPU wrote is the image now: nothing older to fill */
+     front_stale(rt_cpu_sync(id) ? NULL : fo);
+@@ -2807,6 +2831,427 @@
      g_phase = 0;
  }
  
@@ -424,12 +440,53 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    }
 +}
 +
++/* The title binds another screen-sized target just before it flips, without a
++ * draw into it, and the swap presented that one: the scene without the menus
++ * and the HUD, which the title had drawn into the frame's own buffer (the
++ * dump of that buffer has them, the display's picture hasn't). So the swap
++ * presents the last screen-sized colour target the frame drew or cleared
++ * into: noted here at each draw and clear, taken at the swap. */
++static uint32_t g_a51_cover;            /* the target, or 0 */
++static unsigned g_a51_choices;          /* swaps logged */
++
++static void a51_note_cover(void)
++{
++    if (g_hle.title.xbe.title_id != A51_TITLE || !g_pd.rt || !g_pd.disp_w || !g_pd.disp_h) {
++        return;
++    }
++    const PbObj *o = obj_of(g_pd.rt);
++    if (o && o->d.pitch && o->d.w >= g_pd.disp_w && o->d.h >= g_pd.disp_h) {
++        g_a51_cover = g_pd.rt;
++    }
++}
++
++/* The swap's choice: the bound target, or the last screen-sized one drawn. */
++static uint32_t a51_present_choice(uint32_t bound)
++{
++    if (g_hle.title.xbe.title_id != A51_TITLE) {
++        return bound;
++    }
++    const uint32_t c = g_a51_cover;
++    g_a51_cover = 0;
++    const bool change = c && c != bound && obj_of(c);
++    static unsigned first;
++    if (change || first++ < 3 || (g_pd.swaps % A51_EVERY == A51_PHASE)) {
++        if (change ? g_a51_choices < 60 : true) {
++            g_a51_choices += change;
++            a51_out("swap %llu: bound %u, last screen-sized target drawn %u: presents %u%s",
++                    (unsigned long long)g_pd.swaps + 1, bound, c, change ? c : bound, change ? " (changed)" : "");
++        }
++    }
++    return change ? c : bound;
++}
++
 +/* The draw being emitted (emit()). */
 +static void a51_emit(const HleCmdDraw *d, bool ff)
 +{
 +    if (g_hle.title.xbe.title_id != A51_TITLE) {
 +        return;
 +    }
++    a51_note_cover();
 +    a51_track(d);
 +    if (a51_capturing()) {
 +        a51_census(d, ff);
@@ -513,8 +570,8 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
 +    static bool armed;
 +    if (!armed) {
 +        armed = true;
-+        a51_out("frame census armed (title %08x): one frame in %u from swap %u, up to %u of them",
-+                g_hle.title.xbe.title_id, A51_EVERY, A51_PHASE, A51_CAPS);
++        a51_out("frame census armed (title %08x, patch v8 with the present choice): one frame in %u from swap %u, "
++                "up to %u of them", g_hle.title.xbe.title_id, A51_EVERY, A51_PHASE, A51_CAPS);
 +    }
 +    a51_decide();
 +    g_a51_f_draws = g_a51_f_small = g_a51_ntex = 0;
@@ -553,7 +610,7 @@ diff -ruN a/hw/xbox/hle/pb/pbdraw.c b/hw/xbox/hle/pb/pbdraw.c
  /* debug: a new value of debug.hakux.pbdraws=<n> logs the next n draws: the
   * target, each stage's texture registers and object, the vertex source, the
   * skinning mode and the first two attributes' formats (position, weights) */
-@@ -3203,6 +3598,7 @@
+@@ -3203,6 +3648,7 @@
                                                                             : 1.0f / 16777216.0f;
      d->ff_ubo = HLE_DRAW_NO_UBO;
      drawlog(d, ff);
